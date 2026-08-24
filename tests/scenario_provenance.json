@@ -1,0 +1,171 @@
+{
+  "schema_version": 1,
+  "purpose": "P1 executable contract scenarios are provenance records, not a SpecDock parity gate.",
+  "reference_source": "docs/specification/{requirement,design,plan}.md; docs/interview.md",
+  "forbidden_acceptance_assumptions": [
+    "SpecDock executable availability",
+    "legacy success through SPEC_DOCK_WORKTREE_ROOT",
+    "bootstrap failure exit 0",
+    "external remove success",
+    "double force or implicit unlock"
+  ],
+  "scenarios": [
+    {
+      "id": "P1-S01",
+      "name": "top_level_help_exposes_four_commands",
+      "test": "tests/unit/test_p1_contracts.py::test_top_level_help_exposes_four_commands",
+      "requirements": ["WTP-RQ-001", "WTP-RQ-002"],
+      "acceptance_criteria": ["WTP-AC-001", "WTP-AC-002", "WTP-AC-019"],
+      "reference_symbols": ["OD-001", "WTP-RQ-002"],
+      "intentional_changes": ["replace create-only help with the four-command family"]
+    },
+    {
+      "id": "P1-S02",
+      "name": "legacy_environment_is_not_accepted",
+      "test": "tests/unit/test_p1_contracts.py::test_legacy_environment_alone_is_root_required",
+      "requirements": ["WTP-RQ-004", "WTP-RQ-021"],
+      "acceptance_criteria": ["WTP-AC-005", "WTP-AC-019"],
+      "reference_symbols": ["OD-005", "OD-017", "INV-003"],
+      "intentional_changes": ["do not preserve the SpecDock environment variable"]
+    },
+    {
+      "id": "P1-S03",
+      "name": "basic_create_naming_and_artifacts",
+      "test": "tests/unit/test_p1_contracts.py::test_basic_create_uses_main_namespace_and_current_branch",
+      "requirements": ["WTP-RQ-003", "WTP-RQ-006", "WTP-RQ-008"],
+      "acceptance_criteria": ["WTP-AC-002", "WTP-AC-003"],
+      "reference_symbols": ["UC-001", "INV-001", "INV-002"],
+      "intentional_changes": ["assert the standalone path and artifact contract"]
+    },
+    {
+      "id": "P1-S04",
+      "name": "linked_checkout_normalization",
+      "test": "tests/unit/test_p1_contracts.py::test_linked_checkout_uses_main_namespace_and_invocation_branch",
+      "requirements": ["WTP-RQ-003", "WTP-RQ-006"],
+      "acceptance_criteria": ["WTP-AC-004"],
+      "reference_symbols": ["UC-003", "INV-001", "INV-002"],
+      "intentional_changes": ["keep namespace provenance on the main record while using invocation branch context"]
+    },
+    {
+      "id": "P1-S05",
+      "name": "bootstrap_failure_is_partial_and_retained",
+      "test": "tests/unit/test_p1_contracts.py::test_bootstrap_failure_is_partial_nonzero_and_retained",
+      "requirements": ["WTP-RQ-008", "WTP-RQ-009", "WTP-RQ-016"],
+      "acceptance_criteria": ["WTP-AC-006", "WTP-AC-007"],
+      "reference_symbols": ["OD-008", "OD-009", "INV-007"],
+      "intentional_changes": ["reverse the prototype exit-0 behavior and retain artifacts"]
+    },
+    {
+      "id": "P1-S06",
+      "name": "inventory_includes_managed_and_external_records",
+      "test": "tests/integration/test_cli_contracts.py::test_list_exposes_managed_and_external_records",
+      "requirements": ["WTP-RQ-010"],
+      "acceptance_criteria": ["WTP-AC-008"],
+      "reference_symbols": ["UC-004", "WTP-RQ-010"],
+      "intentional_changes": ["introduce inventory instead of create-only behavior"]
+    },
+    {
+      "id": "P1-S07",
+      "name": "show_resolves_or_reports_ambiguity",
+      "test": "tests/integration/test_cli_contracts.py::test_show_reports_ambiguous_basename_with_candidates",
+      "requirements": ["WTP-RQ-011", "WTP-RQ-015", "WTP-RQ-017"],
+      "acceptance_criteria": ["WTP-AC-009", "WTP-AC-013"],
+      "reference_symbols": ["UC-005", "WTP-RQ-011"],
+      "intentional_changes": ["use stable target resolution rather than accepting branch names or first match"]
+    },
+    {
+      "id": "P1-S08",
+      "name": "external_remove_is_blocked",
+      "test": "tests/integration/test_cli_contracts.py::test_external_remove_is_blocked_without_git_mutation",
+      "requirements": ["WTP-RQ-012", "WTP-RQ-013"],
+      "acceptance_criteria": ["WTP-AC-010"],
+      "reference_symbols": ["OD-013", "INV-008"],
+      "intentional_changes": ["observe external records but never remove them"]
+    },
+    {
+      "id": "P1-S09",
+      "name": "dirty_default_remove_and_explicit_force",
+      "test": "tests/integration/test_cli_contracts.py::test_dirty_remove_requires_explicit_single_force",
+      "requirements": ["WTP-RQ-013", "WTP-RQ-016"],
+      "acceptance_criteria": ["WTP-AC-011", "WTP-AC-012"],
+      "reference_symbols": ["OD-011", "INV-012"],
+      "intentional_changes": ["default non-force and one explicit force flag only"]
+    },
+    {
+      "id": "P1-S10",
+      "name": "locked_force_is_blocked",
+      "test": "tests/integration/test_cli_contracts.py::test_locked_target_is_blocked_even_with_force",
+      "requirements": ["WTP-RQ-012", "WTP-RQ-013"],
+      "acceptance_criteria": ["WTP-AC-011"],
+      "reference_symbols": ["OD-012", "INV-008"],
+      "intentional_changes": ["do not unlock or delegate a locked target to Git"]
+    },
+    {
+      "id": "P1-S11",
+      "name": "namespace_symlink_is_fail_closed",
+      "test": "tests/integration/test_cli_contracts.py::test_namespace_symlink_blocks_create_and_remove",
+      "requirements": ["WTP-RQ-005", "WTP-NFR-001"],
+      "acceptance_criteria": ["WTP-AC-005", "WTP-AC-010"],
+      "reference_symbols": ["OD-014", "INV-004", "INV-005"],
+      "intentional_changes": ["reject mutation through a symlinked managed namespace"]
+    },
+    {
+      "id": "P1-S12",
+      "name": "json_envelope_is_single_document_and_clean",
+      "test": "tests/unit/test_p1_contracts.py::test_json_success_has_common_envelope_and_clean_stderr",
+      "requirements": ["WTP-RQ-014", "WTP-RQ-015", "WTP-RQ-016"],
+      "acceptance_criteria": ["WTP-AC-013", "WTP-AC-014"],
+      "reference_symbols": ["OD-002", "OD-003", "INV-014"],
+      "intentional_changes": ["replace generic JSON with schema version 1 and typed nullability"]
+    },
+    {
+      "id": "P1-S13",
+      "name": "thin_wrapper_propagates_argv_streams_and_exit",
+      "test": "tests/integration/test_skill_wrapper.py::test_wrapper_propagates_argv_streams_and_exit",
+      "requirements": ["WTP-RQ-018"],
+      "acceptance_criteria": ["WTP-AC-017"],
+      "reference_symbols": ["OD-017", "INV-015"],
+      "intentional_changes": ["call the PATH-installed executable without business logic"]
+    },
+    {
+      "id": "P1-S14",
+      "name": "skill_requires_explicit_force_intent",
+      "test": "tests/integration/test_skill_wrapper.py::test_skill_documents_explicit_force_authorization",
+      "requirements": ["WTP-RQ-018"],
+      "acceptance_criteria": ["WTP-AC-016"],
+      "reference_symbols": ["OD-016", "INV-016"],
+      "intentional_changes": ["never infer force authorization from a generic remove request"]
+    },
+    {
+      "id": "P1-S15",
+      "name": "host_root_variables_do_not_leak_into_cli",
+      "test": "tests/unit/test_p1_contracts.py::test_cli_runner_removes_host_root_variables",
+      "requirements": ["WTP-RQ-004", "WTP-NFR-004"],
+      "acceptance_criteria": ["WTP-AC-005", "WTP-AC-020"],
+      "reference_symbols": ["OD-005", "INV-003"],
+      "intentional_changes": ["run every subprocess with exact root variables, not host defaults"]
+    }
+  ],
+  "acceptance_criteria_mapping": {
+    "WTP-AC-001": ["P1-S01"],
+    "WTP-AC-002": ["P1-S01", "P1-S03"],
+    "WTP-AC-003": ["P1-S03"],
+    "WTP-AC-004": ["P1-S04"],
+    "WTP-AC-005": ["P1-S02", "P1-S11", "P1-S15"],
+    "WTP-AC-006": ["P1-S05"],
+    "WTP-AC-007": ["P1-S05"],
+    "WTP-AC-008": ["P1-S06"],
+    "WTP-AC-009": ["P1-S07"],
+    "WTP-AC-010": ["P1-S08", "P1-S11"],
+    "WTP-AC-011": ["P1-S09", "P1-S10"],
+    "WTP-AC-012": ["P1-S09"],
+    "WTP-AC-013": ["P1-S07", "P1-S12"],
+    "WTP-AC-014": ["P1-S12"],
+    "WTP-AC-015": ["P1-S14"],
+    "WTP-AC-016": ["P1-S10", "P1-S14"],
+    "WTP-AC-017": ["P1-S13"],
+    "WTP-AC-018": ["P1-S01"],
+    "WTP-AC-019": ["P1-S01", "P1-S02", "P1-S05"],
+    "WTP-AC-020": ["P1-S15"]
+  }
+}
