@@ -323,25 +323,36 @@ def test_final_refresh_new_blocker_is_fail_closed(tmp_path: Path, blocker_kind: 
 
 
 def test_namespace_that_becomes_symlink_is_rejected_before_git(tmp_path: Path) -> None:
-    repo, root, target, git = _fixture(tmp_path)
+    repo, root, target, base_git = _fixture(tmp_path)
     namespace = root / repo.name
+    redirected = tmp_path / "redirected"
+    redirected.mkdir()
+    target.rmdir()
 
-    class FlippingNamespaceFilesystem(FilesystemCliGateway):
-        namespace_checks = 0
+    def flip_namespace() -> None:
+        namespace.rmdir()
+        namespace.symlink_to(redirected, target_is_directory=True)
 
-        def lstat_kind(self, path: Path) -> str:
-            if path == namespace:
-                self.namespace_checks += 1
-                if self.namespace_checks >= 7:
-                    return "symlink"
-            return super().lstat_kind(path)
+    class NamespaceRaceGit(FakeGitGateway):
+        def worktree_list(self, repo_root: Path) -> list[FakeGitRecord]:
+            records = super().worktree_list(repo_root)
+            # The namespace changes after the initial Git snapshot and before
+            # the remove preflight validates it.
+            flip_namespace()
+            return records
+
+    git = NamespaceRaceGit(
+        checkout_root=base_git.checkout_root,
+        records=list(base_git.records),
+        branches=set(base_git.branches),
+    )
 
     with pytest.raises(ExpectedError) as caught:
-        _service(  # The seventh namespace check is the final preflight.
-            git, FlippingNamespaceFilesystem()
-        ).remove(_request(repo, root, target, force=True))
+        _service(git).remove(_request(repo, root, target, force=True))
 
     assert caught.value.code == "unsafe_namespace"
+    assert caught.value.details["reason"] == "symlink"
+    assert namespace.is_symlink()
     assert not [call for call in git.calls if call[0] == "remove_worktree"]
 
 
