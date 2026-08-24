@@ -47,6 +47,13 @@ def test_list_returns_main_managed_and_external_records(
 def test_non_utf8_linked_worktree_path_is_valid_json_and_removable(
     temp_git_repo: TempGitRepository, central_root: Path, cli_runner, json_loads
 ) -> None:
+    environment = {
+        "LC_ALL": "C",
+        "LANG": "C",
+        "PYTHONCOERCECLOCALE": "0",
+        "PYTHONUTF8": "0",
+        "PYTHONIOENCODING": "ascii",
+    }
     namespace = central_root / temp_git_repo.path.name
     invalid_path = Path(
         os.fsdecode(os.fsencode(namespace) + b"/" + temp_git_repo.path.name.encode() + b"-invalid-\xff")
@@ -62,16 +69,38 @@ def test_non_utf8_linked_worktree_path_is_valid_json_and_removable(
     if added.returncode != 0:
         pytest.skip(f"Git/filesystem does not support this raw pathname: {os.fsdecode(added.stderr)}")
 
-    listed = cli_runner("list", "--json", repo=temp_git_repo.path, root=central_root)
+    listed = cli_runner("list", "--json", repo=temp_git_repo.path, root=central_root, environment=environment)
     listed_payload = _payload(listed, json_loads)
     assert listed.returncode == 0, listed.stderr
     listed_bytes = listed.stdout.encode("utf-8")
     assert listed_bytes
+    assert all(ord(character) < 128 for character in listed.stdout)
     assert any(record["path"] == str(invalid_path) for record in listed_payload["result"]["worktrees"])
 
-    removed = cli_runner("remove", str(invalid_path), "--json", repo=temp_git_repo.path, root=central_root)
+    shown = cli_runner(
+        "show",
+        str(invalid_path),
+        "--json",
+        repo=temp_git_repo.path,
+        root=central_root,
+        environment=environment,
+    )
+    shown_payload = _payload(shown, json_loads)
+    assert shown.returncode == 0, shown.stderr
+    assert all(ord(character) < 128 for character in shown.stdout)
+    assert shown_payload["result"]["worktree"]["path"] == str(invalid_path)
+
+    removed = cli_runner(
+        "remove",
+        str(invalid_path),
+        "--json",
+        repo=temp_git_repo.path,
+        root=central_root,
+        environment=environment,
+    )
     removed_payload = _payload(removed, json_loads)
     assert removed.returncode == 0, removed.stderr
+    assert all(ord(character) < 128 for character in removed.stdout)
     assert removed_payload["status"] == "ok"
     assert not invalid_path.exists()
 

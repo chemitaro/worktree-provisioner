@@ -150,7 +150,9 @@ def operation_for_result(result: object) -> str:
 def json_value(value: object) -> object:
     """Convert supported application values without implicit dataclass flattening."""
 
-    if value is None or isinstance(value, (str, int, float, bool)):
+    if isinstance(value, str):
+        return _restore_utf8_surrogates(value)
+    if value is None or isinstance(value, (int, float, bool)):
         return value
     if isinstance(value, Path):
         return _absolute_path(value)
@@ -269,7 +271,24 @@ def remove_payload(result: RemoveResult) -> dict[str, object]:
 
 def _absolute_path(path: Path) -> str:
     candidate = path.expanduser()
-    return str(candidate if candidate.is_absolute() else candidate.absolute())
+    return _restore_utf8_surrogates(str(candidate if candidate.is_absolute() else candidate.absolute()))
+
+
+def _restore_utf8_surrogates(value: str) -> str:
+    """Restore UTF-8 bytes represented by Python's filesystem surrogates.
+
+    A process started under the C locale decodes non-ASCII argv and Git
+    output with ``surrogateescape``.  Reconstructing and decoding only valid
+    UTF-8 sequences makes those paths readable to JSON consumers while
+    leaving genuinely non-UTF-8 paths in their reversible surrogate form.
+    """
+
+    if not any(0xDC80 <= ord(character) <= 0xDCFF for character in value):
+        return value
+    try:
+        return value.encode("utf-8", errors="surrogateescape").decode("utf-8")
+    except (UnicodeDecodeError, UnicodeEncodeError):
+        return value
 
 
 def _bounded(value: str, limit: int = 4096) -> str:

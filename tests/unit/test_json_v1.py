@@ -163,6 +163,16 @@ def test_dumps_escapes_surrogateescape_paths_as_reversible_utf8() -> None:
     assert json.loads(serialized)["label"] == "日本語"
 
 
+def test_json_value_restores_valid_utf8_surrogateescape_paths() -> None:
+    utf8_surrogate_path = b"/tmp/repo-\xe6\x97\xa5\xe6\x9c\xac".decode("ascii", errors="surrogateescape")
+    raw_surrogate_path = b"/tmp/repo-\xff".decode("ascii", errors="surrogateescape")
+
+    converted = cast(dict[str, Any], json_value({"path": utf8_surrogate_path, "raw": raw_surrogate_path}))
+
+    assert converted["path"] == "/tmp/repo-日本"
+    assert converted["raw"] == raw_surrogate_path
+
+
 def test_all_blocker_codes_are_explicitly_typed_in_worktree_payload() -> None:
     blockers = get_args(BlockerCode)
     for blocker in blockers:
