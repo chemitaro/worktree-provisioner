@@ -123,12 +123,14 @@ class WorktreeService:
             )
         except Exception as exc:
             # Inspect the failed candidate before deciding whether to retry.
-            # A typed collision that left any observable artifact is
-            # fail-closed: retrying would hide a partial Git mutation.
+            # The artifact named by a typed collision is the expected race
+            # collider (for example, a branch created between preflight and
+            # Git).  Any additional candidate artifact remains fail-closed so
+            # a partial mutation is never hidden by the retry.
             artifacts = self._observe_artifacts(request.repo_root, candidate, namespace)
-            if is_retryable_git_collision(exc) and _artifacts_are_absent(artifacts):
+            if is_retryable_git_collision(exc):
                 refreshed = self._try_refresh_records(request.repo_root)
-                if refreshed is not None:
+                if refreshed is not None and _collision_retry_is_safe(exc, artifacts, candidate, refreshed):
                     # A recognised race is the only path allowed to retry.
                     # Preserve any created artifacts; the next attempt gets a
                     # fresh inventory snapshot and a new candidate.
@@ -251,11 +253,13 @@ class WorktreeService:
             operation="remove",
         )
         initial = self._resolve_remove_target(initial_views, request.target, phase="initial", request=request)
+        initial_main_worktree_path = _record_canonical_path(initial_records[0])
         initial_blockers = self._remove_blockers_for(
             initial,
             root=root,
             namespace=namespace,
             repo_root=request.repo_root,
+            main_worktree_path=initial_main_worktree_path,
         )
         if initial_blockers:
             raise self._remove_blocked(request, initial, initial_blockers)
@@ -277,6 +281,7 @@ class WorktreeService:
             operation="remove",
         )
         refreshed = self._resolve_remove_target(refreshed_views, request.target, phase="refresh", request=request)
+        refreshed_main_worktree_path = _record_canonical_path(refreshed_records[0])
         if canonical_path(initial.path) != canonical_path(refreshed.path):
             raise self._remove_blocked(
                 request,
@@ -297,6 +302,7 @@ class WorktreeService:
             root=root,
             namespace=refreshed_namespace,
             repo_root=request.repo_root,
+            main_worktree_path=refreshed_main_worktree_path,
         )
         if refreshed_blockers:
             raise self._remove_blocked(request, refreshed, refreshed_blockers)
@@ -326,6 +332,7 @@ class WorktreeService:
             root=root,
             namespace=refreshed_namespace,
             target=refreshed,
+            main_worktree_path=refreshed_main_worktree_path,
         )
         if cleanup_error is not None:
             raise self._error(
@@ -414,9 +421,10 @@ class WorktreeService:
         root: Path,
         namespace: Path,
         repo_root: Path,
+        main_worktree_path: Path,
     ) -> tuple[BlockerCode, ...]:
         blockers = list(record.remove_blockers)
-        if self._is_protected_cleanup_path(record.path, root, namespace, repo_root):
+        if self._is_protected_cleanup_path(record.path, root, namespace, repo_root, main_worktree_path):
             blockers.append("protected_cleanup_path")
         # Inventory classification is intentionally repeated at the remove
         # boundary; a malformed view must fail closed rather than rely on a
@@ -431,13 +439,14 @@ class WorktreeService:
         root: Path,
         namespace: Path,
         repo_root: Path,
+        main_worktree_path: Path,
     ) -> bool:
         lexical_target = _absolute_lexical_path(target)
         try:
             canonical_target = canonical_path(target)
         except (OSError, RuntimeError):
             return True
-        for protected in (root, namespace, repo_root):
+        for protected in (root, namespace, repo_root, main_worktree_path):
             lexical_protected = _absolute_lexical_path(protected)
             try:
                 canonical_protected = canonical_path(protected)
@@ -503,6 +512,7 @@ class WorktreeService:
         root: Path,
         namespace: Path,
         target: WorktreeRecordView,
+        main_worktree_path: Path,
     ) -> dict[str, object] | None:
         """Recheck containment and clean only the exact leftover target."""
 
@@ -513,7 +523,7 @@ class WorktreeService:
         if kind != "directory":
             return {"reason": "unsafe_namespace_after_git", "namespace": str(namespace), "kind": kind}
         if not self._is_managed_path(target.path, namespace) or self._is_protected_cleanup_path(
-            target.path, root, namespace, request.repo_root
+            target.path, root, namespace, request.repo_root, main_worktree_path
         ):
             return {
                 "reason": "protected_or_outside_target_after_git",
@@ -992,9 +1002,9 @@ class WorktreeService:
                 )
             except Exception as exc:
                 artifacts = self._observe_artifacts(request.repo_root, candidate, namespace)
-                if is_retryable_git_collision(exc) and _artifacts_are_absent(artifacts):
+                if is_retryable_git_collision(exc):
                     refreshed = self._try_refresh_records(request.repo_root)
-                    if refreshed is not None:
+                    if refreshed is not None and _collision_retry_is_safe(exc, artifacts, candidate, refreshed):
                         known_paths = {_record_canonical_path(record) for record in refreshed}
                         continue
                 raise self._error(
@@ -1219,13 +1229,69 @@ def _artifact_dict(result: ArtifactState) -> dict[str, bool | None]:
     }
 
 
-def _artifacts_are_absent(result: ArtifactState) -> bool:
-    """Return true only when all candidate artifact checks prove absence."""
+def _collision_retry_is_safe(
+    error: BaseException,
+    artifacts: ArtifactState,
+    candidate: WorktreeCandidate,
+    records: Sequence[GitWorktreeRecord],
+) -> bool:
+    """Allow a typed race retry without concealing a partial mutation.
 
+    Git's typed collision is authoritative about which candidate namespace was
+    refused.  The refreshed inventory then proves whether that namespace is a
+    pre-existing collider or whether this attempt also created a candidate
+    artifact.  Unknown/mismatched observations remain fail-closed.
+    """
+
+    kind = getattr(error, "collision_kind", None)
+    if kind not in {"branch", "path", "checked_out"}:
+        return False
+    candidate_path = canonical_path(candidate.path)
+    candidate_record = any(_record_canonical_path(record) == candidate_path for record in records)
+    matching_branch_record = any(record.branch == candidate.branch for record in records)
+    if candidate_record:
+        return False
+
+    if kind == "branch":
+        # A local branch may have appeared in the race, but a worktree record
+        # for it means the refusal was actually a checked-out collision or a
+        # partial add and must be surfaced.
+        return (
+            artifacts.worktree_path_exists is False
+            and artifacts.branch_exists is True
+            and artifacts.worktree_record_exists is False
+            and not matching_branch_record
+        ) or (
+            artifacts.worktree_path_exists is False
+            and artifacts.branch_exists is False
+            and artifacts.worktree_record_exists is False
+            and not matching_branch_record
+        )
+
+    if kind == "path":
+        # The path itself is the expected collider.  A branch or worktree
+        # record in addition to it indicates an attempt-derived mutation.
+        return (
+            artifacts.worktree_path_exists is True
+            and artifacts.branch_exists is False
+            and artifacts.worktree_record_exists is False
+            and not matching_branch_record
+        ) or (
+            artifacts.worktree_path_exists is False
+            and artifacts.branch_exists is False
+            and artifacts.worktree_record_exists is False
+            and not matching_branch_record
+        )
+
+    # A checked-out collision is proven by the same branch being recorded at a
+    # different path.  The candidate path must remain absent.
     return (
-        result.worktree_path_exists is False
-        and result.branch_exists is False
-        and result.worktree_record_exists is False
+        artifacts.worktree_path_exists is False
+        and artifacts.branch_exists is True
+        and artifacts.worktree_record_exists is False
+        and any(
+            record.branch == candidate.branch and _record_canonical_path(record) != candidate_path for record in records
+        )
     )
 
 

@@ -53,7 +53,7 @@ def test_no_makefile_is_skipped_without_invoking_make(tmp_path: Path, monkeypatc
 
 def test_no_init_target_is_skipped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     (tmp_path / "Makefile").write_text("all:\n\t@echo all\n", encoding="utf-8")
-    calls, runner = _runner_for([_completed(2, stderr="make: *** No rule to make target 'init'. Stop.\n")])
+    calls, runner = _runner_for([_completed(0, stdout="all:\n")])
     monkeypatch.setattr("worktree_provisioner.infra.make_cli.shutil.which", lambda _: "/usr/bin/make")
 
     result = MakeCliGateway(runner=runner).run_make_init_if_available(tmp_path)
@@ -62,6 +62,30 @@ def test_no_init_target_is_skipped(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     assert result.command is None
     assert len(calls) == 1
     assert calls[0][0] == ["make", "-n", "init"]
+
+
+def test_missing_target_diagnostic_spoof_is_detection_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "Makefile").write_text("$(error No rule to make target 'init')\n", encoding="utf-8")
+    calls, runner = _runner_for([_completed(2, stderr="No rule to make target 'init'\n")])
+    monkeypatch.setattr("worktree_provisioner.infra.make_cli.shutil.which", lambda _: "/usr/bin/make")
+
+    result = MakeCliGateway(runner=runner).run_make_init_if_available(tmp_path)
+
+    assert result.status == "detection_failed"
+    assert result.command == ("make", "-n", "init")
+    assert len(calls) == 1
+
+
+def test_localized_missing_target_diagnostic_is_detection_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "Makefile").write_text("all:\n", encoding="utf-8")
+    _calls, runner = _runner_for([_completed(2, stderr="No se encontró ninguna regla para init\n")])
+    monkeypatch.setattr("worktree_provisioner.infra.make_cli.shutil.which", lambda _: "/usr/bin/make")
+
+    result = MakeCliGateway(runner=runner).run_make_init_if_available(tmp_path)
+
+    assert result.status == "detection_failed"
 
 
 def test_make_unavailable_is_detection_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -91,7 +115,7 @@ def test_parse_or_include_error_is_detection_failure(tmp_path: Path, monkeypatch
 
 def test_success_runs_detection_then_init_in_created_worktree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     (tmp_path / "Makefile").write_text("init:\n\t@echo initialized\n", encoding="utf-8")
-    calls, runner = _runner_for([_completed(0, stdout="echo initialized\n"), _completed(0)])
+    calls, runner = _runner_for([_completed(0, stdout="init:\n"), _completed(0)])
     monkeypatch.setattr("worktree_provisioner.infra.make_cli.shutil.which", lambda _: "/usr/bin/make")
 
     result = MakeCliGateway(runner=runner).run_make_init_if_available(tmp_path)
@@ -107,7 +131,9 @@ def test_success_runs_detection_then_init_in_created_worktree(tmp_path: Path, mo
 
 def test_make_init_failure_is_failed_and_diagnostic_is_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     (tmp_path / "Makefile").write_text("init:\n", encoding="utf-8")
-    _calls, runner = _runner_for([_completed(0), _completed(7, stdout="out" * 5000, stderr="err" * 5000)])
+    _calls, runner = _runner_for(
+        [_completed(0, stdout="init:\n"), _completed(7, stdout="out" * 5000, stderr="err" * 5000)]
+    )
     monkeypatch.setattr("worktree_provisioner.infra.make_cli.shutil.which", lambda _: "/usr/bin/make")
 
     result = MakeCliGateway(runner=runner).run_make_init_if_available(tmp_path)
@@ -140,7 +166,7 @@ def test_make_diagnostic_redacts_representative_secrets_before_publication(
         "Authorization: Bearer authorization-value-def "
         "Bearer bearer-value-ghi\n" + "x" * 20_000
     )
-    _calls, runner = _runner_for([_completed(0), _completed(7, stdout=diagnostic, stderr=diagnostic)])
+    _calls, runner = _runner_for([_completed(0, stdout="init:\n"), _completed(7, stdout=diagnostic, stderr=diagnostic)])
     monkeypatch.setattr("worktree_provisioner.infra.make_cli.shutil.which", lambda _: "/usr/bin/make")
 
     result = MakeCliGateway(runner=runner).run_make_init_if_available(tmp_path)
@@ -170,9 +196,120 @@ def test_real_make_capture_is_bounded_and_redacted(tmp_path: Path) -> None:
     assert "[REDACTED]" in result.detail
 
 
+def test_real_make_structural_probe_finds_init_after_long_prelude(tmp_path: Path) -> None:
+    if shutil.which("make") is None:
+        pytest.skip("make is unavailable")
+    prelude = "".join(f"PRELUDE_{index} := value-{index}\n" for index in range(1500))
+    (tmp_path / "Makefile").write_text(
+        f"{prelude}init:\n\t@touch init-ran\n",
+        encoding="utf-8",
+    )
+
+    result = MakeCliGateway().run_make_init_if_available(tmp_path)
+
+    assert result.status == "succeeded"
+    assert (tmp_path / "init-ran").is_file()
+
+
+@pytest.mark.parametrize("makefile", ["init:\n", "init: prerequisite\nprerequisite:\n"])
+def test_real_make_structural_probe_accepts_init_without_recipe(tmp_path: Path, makefile: str) -> None:
+    if shutil.which("make") is None:
+        pytest.skip("make is unavailable")
+    (tmp_path / "Makefile").write_text(makefile, encoding="utf-8")
+
+    result = MakeCliGateway().run_make_init_if_available(tmp_path)
+
+    assert result.status == "succeeded"
+    assert result.command == ("make", "init")
+
+
+def test_real_make_structural_probe_preserves_special_makefile_path(tmp_path: Path) -> None:
+    if shutil.which("make") is None:
+        pytest.skip("make is unavailable")
+    target = tmp_path / "repo $ # with space"
+    target.mkdir()
+    (target / "Makefile").write_text("init:\n\t@touch initialized\n", encoding="utf-8")
+
+    result = MakeCliGateway().run_make_init_if_available(target)
+
+    assert result.status == "succeeded"
+    assert (target / "initialized").is_file()
+
+
+def test_real_make_diagnostic_target_spoof_does_not_create_bootstrap(tmp_path: Path) -> None:
+    if shutil.which("make") is None:
+        pytest.skip("make is unavailable")
+    (tmp_path / "Makefile").write_text(
+        "$(info init:)\nall:\n\t@touch all-ran\n",
+        encoding="utf-8",
+    )
+
+    result = MakeCliGateway().run_make_init_if_available(tmp_path)
+
+    assert result.status == "skipped"
+    assert not (tmp_path / "all-ran").exists()
+
+
+def test_real_make_error_text_spoof_is_detection_failure(tmp_path: Path) -> None:
+    if shutil.which("make") is None:
+        pytest.skip("make is unavailable")
+    (tmp_path / "Makefile").write_text(
+        "$(error No rule to make target 'init')\n",
+        encoding="utf-8",
+    )
+
+    result = MakeCliGateway().run_make_init_if_available(tmp_path)
+
+    assert result.status == "detection_failed"
+    assert result.command == ("make", "-n", "init")
+    assert result.exit_code != 0
+
+
+def test_real_make_missing_init_prerequisite_is_not_skipped(tmp_path: Path) -> None:
+    if shutil.which("make") is None:
+        pytest.skip("make is unavailable")
+    (tmp_path / "Makefile").write_text(
+        "init: missing-prerequisite\n\t@echo init\n",
+        encoding="utf-8",
+    )
+
+    result = MakeCliGateway().run_make_init_if_available(tmp_path)
+
+    assert result.status == "detection_failed"
+    assert result.exit_code != 0
+
+
+def test_real_make_unrelated_default_failure_does_not_hide_init(tmp_path: Path) -> None:
+    if shutil.which("make") is None:
+        pytest.skip("make is unavailable")
+    (tmp_path / "Makefile").write_text(
+        "all: missing-default\ninit:\n\t@touch initialized\n",
+        encoding="utf-8",
+    )
+
+    result = MakeCliGateway().run_make_init_if_available(tmp_path)
+
+    assert result.status == "succeeded"
+    assert (tmp_path / "initialized").is_file()
+
+
+def test_real_make_repository_default_rule_remains_available_for_init(tmp_path: Path) -> None:
+    if shutil.which("make") is None:
+        pytest.skip("make is unavailable")
+    (tmp_path / "Makefile").write_text(
+        ".DEFAULT:\n\t@touch $@\ninit: generated\n",
+        encoding="utf-8",
+    )
+
+    result = MakeCliGateway().run_make_init_if_available(tmp_path)
+
+    assert result.status == "succeeded"
+    assert (tmp_path / "generated").is_file()
+
+
 def test_make_runner_start_failure_is_reported_as_failed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     (tmp_path / "Makefile").write_text("init:\n", encoding="utf-8")
-    responses = [_completed(0)]
+    responses = [_completed(0, stdout="init:\n")]
 
     def runner(
         args: Sequence[str],

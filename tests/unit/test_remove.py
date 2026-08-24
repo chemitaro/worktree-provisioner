@@ -160,6 +160,33 @@ def test_hard_blockers_never_reach_git_remove(tmp_path: Path, case: str, force: 
     assert not [call for call in git.calls if call[0] == "remove_worktree"]
 
 
+@pytest.mark.parametrize("target_kind", ["main", "main_ancestor"])
+@pytest.mark.parametrize("force", [False, True])
+def test_linked_checkout_protects_main_inventory_path_and_ancestors(
+    tmp_path: Path, target_kind: str, force: bool
+) -> None:
+    root = tmp_path / "root"
+    namespace = root / "checkout"
+    main_ancestor = namespace / "nested"
+    main = main_ancestor / "checkout"
+    main.mkdir(parents=True)
+    linked = tmp_path / "linked-checkout"
+    linked.mkdir()
+    records = [
+        FakeGitRecord(path=main, branch="main"),
+        FakeGitRecord(path=main_ancestor, branch="ancestor"),
+    ]
+    git = FakeGitGateway(checkout_root=linked, records=records, branches={"main", "ancestor"})
+    target = main if target_kind == "main" else main_ancestor
+
+    with pytest.raises(ExpectedError) as caught:
+        _service(git).remove(_request(linked, root, target, force=force))
+
+    assert caught.value.code == "remove_blocked"
+    assert "protected_cleanup_path" in _blockers(caught.value)
+    assert not [call for call in git.calls if call[0] == "remove_worktree"]
+
+
 def test_namespace_symlink_is_classified_as_unsafe_for_remove(tmp_path: Path) -> None:
     repo, root, target, git = _fixture(tmp_path)
     target.rmdir()
