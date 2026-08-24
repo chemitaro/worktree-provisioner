@@ -4,11 +4,12 @@
 
 - 要件・設計・計画の基準 SHA: `41129b3a3a7f0b913f6181aa4b7fbc7bd3b7f7be`
 - P10 開始時の実装親 SHA: `2224f9dd125e9edd731888c0a84a42d7c4b95ebd`
-- P10 の最終 candidate SHA: P10 の変更を primary が commit した後に更新する（このレポート作成時点では未commit）。
+- P10 の実装・CI検証対象 SHA: `8e807a4ed357fca87fc205e9cc08008417ba31eb`（`git rev-parse HEAD` で確認）。
+- GitHub Actions run: `32739157960`（上記SHA、8/8 jobs success）。
 - リポジトリ: `chemitaro/worktree-provisioner`
 - ブランチ: `codex/implement-worktree-provisioner`
 
-P10 は remote、GitHub、commit、push を実行していない。最終 candidate SHA、upstream SHA、ChatGPT Final Quality Gate Strict の結果は primary の commit/push 後に確定する。
+P10 lane は remote、GitHub、commit、push を実行していない。上記SHAは primary が公開した実装・CI検証対象である。このレポート更新は docs-only であり、上記SHAの descendant として primary が commit する。report自身のcommit SHAは先取りせず、primaryのcommit/push後にその exact SHAでCIと ChatGPT Final Quality Gate Strict を再実行する。
 
 ## フェーズの実装結果
 
@@ -181,9 +182,10 @@ no worktree status/prune/repair, branch delete, github issue, or workbench opera
 ## Platform evidence と残る制限
 
 - macOS: 上記 full quality、clean wheel install、CLI smoke、JSON samples、skill validation をこの macOS arm64 環境で実行済み。
-- Linux: `.github/workflows/ci.yml` に `ubuntu-latest` と Python `3.10`〜`3.13` の matrix、Ruff、Mypy、Pytest、build、installed-wheel smoke を設定済み。ただし、P10 laneでは GitHub Actions を起動・確認していない。Linux が実行済みであるとは扱わない。
+- GitHub Actions run `32739157960`: 実装・CI検証対象SHA `8e807a4ed357fca87fc205e9cc08008417ba31eb` に対して、macOS/Linux × Python `3.10`〜`3.13` の8/8 jobsが成功した。各jobで `uv sync --locked --all-groups`、`uv run ruff format --check .`、`uv run ruff check .`、`uv run mypy src tests`、`uv run pytest -q`（205 passed）、`uv build`、installed wheel smokeを実行済みである。これはmacOSローカル証拠とは別のGitHub Actions証拠であり、Linuxもこのrunで実行済みである。
+- 同runのNode 20 deprecation annotationsは外部actionのnon-blocking warningであり、8/8 jobsの成功を妨げていない。
 - Windows: 初期版の対応対象外。
 - package registry publication、tag/release、protected branch 設定変更は未実施であり、計画スコープ外。
-- ChatGPT Final Quality Gate Strict は P10 の commit/push 後に primary が実施する。最終 SHA と gate result はこのレポートの後続更新で確定する。
+- このdocs-only report commitはCI検証対象SHAのdescendantになる。primaryはそのexact SHAに対してCIと ChatGPT Final Quality Gate Strict を再実行し、report commit自身のSHAとgate resultを後続更新で確定する。
 
-P10 のローカル実装・品質検証ステータスは PASS であるが、repository publication と Final Quality Gate Strict の完了をもって最終提出とする。
+P10 のローカル実装・GitHub Actions品質検証ステータスは PASS である。docs-only report commit後のexact SHAに対するCI再実行と ChatGPT Final Quality Gate Strict の完了をもって最終提出とする。
