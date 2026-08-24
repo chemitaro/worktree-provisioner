@@ -253,8 +253,7 @@ def _diagnostic(stdout: str | None, stderr: str | None) -> str:
     first_budget = content_budget // 2
     second_budget = content_budget - first_budget
     return (
-        f"stderr: {_bounded(streams[0][1], limit=first_budget)}\n"
-        f"stdout: {_bounded(streams[1][1], limit=second_budget)}"
+        f"stderr: {_bounded(streams[0][1], limit=first_budget)}\nstdout: {_bounded(streams[1][1], limit=second_budget)}"
     )
 
 

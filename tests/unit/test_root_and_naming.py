@@ -49,9 +49,7 @@ def test_legacy_environment_is_not_queried() -> None:
     assert environment.requested == ["WORKTREE_PROVISIONER_ROOT"]
 
 
-def test_broken_symlink_root_is_rejected_before_missing_root_creation(
-    tmp_path: Path, symlink_capability: Path
-) -> None:
+def test_broken_symlink_root_is_rejected_before_missing_root_creation(tmp_path: Path, symlink_capability: Path) -> None:
     del symlink_capability
     lexical_root = tmp_path / "broken-root"
     lexical_root.symlink_to(tmp_path / "does-not-exist")

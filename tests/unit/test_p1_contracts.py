@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from conftest import CliResult, TempGitRepository
 
 
-def _payload(result: CliResult, json_loads: object) -> dict[str, object]:
-    assert callable(json_loads)
-    return json_loads(result.stdout)  # type: ignore[operator]
+def _payload(result: CliResult, json_loads: Callable[[str], dict[str, Any]]) -> dict[str, Any]:
+    return json_loads(result.stdout)
 
 
 def test_top_level_help_exposes_four_commands(cli_runner) -> None:
@@ -130,9 +131,7 @@ def test_json_success_has_common_envelope_and_clean_stderr(
     assert result.stderr == ""
 
 
-def test_cli_runner_removes_host_root_variables(
-    temp_git_repo: TempGitRepository, cli_runner, json_loads
-) -> None:
+def test_cli_runner_removes_host_root_variables(temp_git_repo: TempGitRepository, cli_runner, json_loads) -> None:
     result = cli_runner("create", "--json", repo=temp_git_repo.path)
     payload = _payload(result, json_loads)
 

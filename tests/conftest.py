@@ -15,9 +15,11 @@ import sys
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
+
+from worktree_provisioner.application.contracts import BootstrapResult, BootstrapStatus
 
 
 @dataclass(frozen=True)
@@ -142,9 +144,23 @@ class FakeBootstrapGateway:
     result: FakeBootstrapResult = field(default_factory=FakeBootstrapResult)
     calls: list[Path] = field(default_factory=list)
 
-    def run_make_init_if_available(self, worktree_path: Path) -> FakeBootstrapResult:
+    def run_make_init_if_available(self, worktree_path: Path) -> BootstrapResult:
         self.calls.append(worktree_path)
-        return self.result
+        status = cast(BootstrapStatus, self.result.status)
+        command: tuple[str, ...] | None
+        if status in {"disabled", "skipped"}:
+            command = None
+        elif status == "detection_failed":
+            command = ("make", "-n", "init")
+        else:
+            command = ("make", "init")
+        return BootstrapResult(
+            requested=status != "disabled",
+            status=status,
+            command=command,
+            exit_code=self.result.exit_code,
+            detail=self.result.detail,
+        )
 
 
 @dataclass

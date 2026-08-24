@@ -86,9 +86,7 @@ locked maintenance window
 
 
 def test_parser_does_not_depend_on_final_blank_line() -> None:
-    records = parse_worktree_porcelain(
-        "worktree /repo\nHEAD abc\nbranch refs/heads/main\n"
-    )
+    records = parse_worktree_porcelain("worktree /repo\nHEAD abc\nbranch refs/heads/main\n")
 
     assert records == [GitWorktreeRecord(path=Path("/repo"), head="abc", branch="main")]
 
@@ -103,9 +101,7 @@ def test_git_gateway_conforms_to_protocol() -> None:
     assert isinstance(gateway, GitCliGateway)
 
 
-def test_git_gateway_uses_exact_argv_and_preserves_paths(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_git_gateway_uses_exact_argv_and_preserves_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
     add_path = tmp_path / "worktree path"
@@ -200,9 +196,7 @@ def test_missing_git_is_typed_error(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert caught.value.argv == ("git", "worktree", "list", "--porcelain")
 
 
-def test_oserror_and_command_output_are_typed_and_bounded(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_oserror_and_command_output_are_typed_and_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
     monkeypatch.setattr("worktree_provisioner.infra.git_cli.shutil.which", lambda _: "/usr/bin/git")

@@ -345,9 +345,7 @@ def test_root_mkdir_failure_is_expected_and_does_not_call_git_add(
     assert not temp_git_repo.git("branch", "--list", "main-mkdir-failure").stdout.strip()
 
 
-def test_legacy_root_only_is_rejected(
-    temp_git_repo: TempGitRepository, tmp_path: Path, cli_runner, json_loads
-) -> None:
+def test_legacy_root_only_is_rejected(temp_git_repo: TempGitRepository, tmp_path: Path, cli_runner, json_loads) -> None:
     legacy = tmp_path / "legacy"
     result = cli_runner(
         "create",

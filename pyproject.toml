@@ -56,3 +56,6 @@ line-ending = "lf"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/worktree_provisioner"]
+
+[tool.hatch.build.targets.sdist]
+exclude = ["/docs/implementation-report.md"]

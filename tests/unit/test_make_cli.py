@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from worktree_provisioner.application.contracts import BootstrapResult
-from worktree_provisioner.infra.make_cli import MakeAdapterError, MakeCliGateway
+from worktree_provisioner.infra.make_cli import MakeAdapterError, MakeCliGateway, MakeRunner
 
 
 def _completed(returncode: int, *, stdout: str = "", stderr: str = "") -> subprocess.CompletedProcess[str]:
@@ -15,11 +17,26 @@ def _completed(returncode: int, *, stdout: str = "", stderr: str = "") -> subpro
 
 def _runner_for(
     responses: list[subprocess.CompletedProcess[str]],
-) -> tuple[list[tuple[list[str], dict[str, object]]], object]:
+) -> tuple[list[tuple[list[str], dict[str, object]]], MakeRunner]:
     calls: list[tuple[list[str], dict[str, object]]] = []
 
-    def runner(argv, **kwargs):
-        calls.append((argv, kwargs))
+    def runner(
+        args: Sequence[str],
+        *,
+        cwd: Path,
+        capture_output: bool,
+        text: bool,
+        check: bool,
+        shell: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        kwargs: dict[str, Any] = {
+            "cwd": cwd,
+            "capture_output": capture_output,
+            "text": text,
+            "check": check,
+            "shell": shell,
+        }
+        calls.append((list(args), kwargs))
         return responses.pop(0)
 
     return calls, runner
@@ -35,9 +52,7 @@ def test_no_makefile_is_skipped_without_invoking_make(tmp_path: Path, monkeypatc
 
 def test_no_init_target_is_skipped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     (tmp_path / "Makefile").write_text("all:\n\t@echo all\n", encoding="utf-8")
-    calls, runner = _runner_for(
-        [_completed(2, stderr="make: *** No rule to make target 'init'. Stop.\n")]
-    )
+    calls, runner = _runner_for([_completed(2, stderr="make: *** No rule to make target 'init'. Stop.\n")])
     monkeypatch.setattr("worktree_provisioner.infra.make_cli.shutil.which", lambda _: "/usr/bin/make")
 
     result = MakeCliGateway(runner=runner).run_make_init_if_available(tmp_path)
@@ -89,13 +104,9 @@ def test_success_runs_detection_then_init_in_created_worktree(tmp_path: Path, mo
     assert all(call[1]["check"] is False for call in calls)
 
 
-def test_make_init_failure_is_failed_and_diagnostic_is_bounded(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_make_init_failure_is_failed_and_diagnostic_is_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     (tmp_path / "Makefile").write_text("init:\n", encoding="utf-8")
-    _calls, runner = _runner_for(
-        [_completed(0), _completed(7, stdout="out" * 5000, stderr="err" * 5000)]
-    )
+    _calls, runner = _runner_for([_completed(0), _completed(7, stdout="out" * 5000, stderr="err" * 5000)])
     monkeypatch.setattr("worktree_provisioner.infra.make_cli.shutil.which", lambda _: "/usr/bin/make")
 
     result = MakeCliGateway(runner=runner).run_make_init_if_available(tmp_path)
@@ -113,8 +124,17 @@ def test_make_runner_start_failure_is_reported_as_failed(tmp_path: Path, monkeyp
     (tmp_path / "Makefile").write_text("init:\n", encoding="utf-8")
     responses = [_completed(0)]
 
-    def runner(argv, **kwargs):
-        if argv == ["make", "init"]:
+    def runner(
+        args: Sequence[str],
+        *,
+        cwd: Path,
+        capture_output: bool,
+        text: bool,
+        check: bool,
+        shell: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        del cwd, capture_output, text, check, shell
+        if args == ["make", "init"]:
             raise OSError("spawn failed")
         return responses.pop(0)
 

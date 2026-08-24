@@ -58,4 +58,3 @@ class ApplicationPorts:
 
 # Short alias for callers that use the generic term from the composition root.
 Ports = ApplicationPorts
-

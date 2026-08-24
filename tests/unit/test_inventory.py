@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 import pytest
 from conftest import FakeBootstrapGateway, FakeGitGateway, FakeGitRecord  # type: ignore[import-not-found]
 
-from worktree_provisioner.application.contracts import ExpectedError, GitWorktreeRecord, ListRequest
-from worktree_provisioner.application.ports import ApplicationPorts
+from worktree_provisioner.application.contracts import ExpectedError, ListRequest
+from worktree_provisioner.application.ports import ApplicationPorts, BootstrapGateway, GitGateway
 from worktree_provisioner.application.worktree_service import WorktreeService
 from worktree_provisioner.infra.environment import EnvironmentAdapter
 from worktree_provisioner.infra.filesystem import FilesystemCliGateway
@@ -15,8 +16,8 @@ from worktree_provisioner.infra.filesystem import FilesystemCliGateway
 def _service(git: FakeGitGateway) -> WorktreeService:
     return WorktreeService(
         ApplicationPorts(
-            git=git,
-            bootstrap=FakeBootstrapGateway(),
+            git=cast(GitGateway, git),
+            bootstrap=cast(BootstrapGateway, FakeBootstrapGateway()),
             filesystem=FilesystemCliGateway(),
             environment=EnvironmentAdapter(),
         )
@@ -37,23 +38,23 @@ def test_inventory_preserves_flags_and_deterministic_blockers(tmp_path: Path) ->
     external.mkdir()
 
     records = [
-        GitWorktreeRecord(path=repo, head="main-head", branch="main"),
-        GitWorktreeRecord(path=managed, head="feature-head", branch="feature"),
-        GitWorktreeRecord(path=external, head="external-head", branch="external"),
-        GitWorktreeRecord(
+        FakeGitRecord(path=repo, head="main-head", branch="main"),
+        FakeGitRecord(path=managed, head="feature-head", branch="feature"),
+        FakeGitRecord(path=external, head="external-head", branch="external"),
+        FakeGitRecord(
             path=locked,
             head="locked-head",
             branch="locked",
             locked=True,
             lock_reason="busy",
         ),
-        GitWorktreeRecord(
+        FakeGitRecord(
             path=namespace / "checkout-stale",
             head="stale-head",
             branch="stale",
             detached=True,
         ),
-        GitWorktreeRecord(
+        FakeGitRecord(
             path=namespace / "checkout-bare",
             head=None,
             branch=None,
@@ -111,8 +112,8 @@ def test_missing_namespace_classifies_existing_records_as_external(tmp_path: Pat
     )
     service = WorktreeService(
         ApplicationPorts(
-            git=git,
-            bootstrap=FakeBootstrapGateway(),
+            git=cast(GitGateway, git),
+            bootstrap=cast(BootstrapGateway, FakeBootstrapGateway()),
             filesystem=MissingNamespaceFilesystem(),
             environment=EnvironmentAdapter(),
         )

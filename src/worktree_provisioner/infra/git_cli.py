@@ -171,11 +171,7 @@ class GitCliGateway:
 
         repo = _validated_path(repo_root, name="repository root")
         target = _validated_path(path, name="worktree path", require_exists=False)
-        args = (
-            ("worktree", "remove", "--force", str(target))
-            if force
-            else ("worktree", "remove", str(target))
-        )
+        args = ("worktree", "remove", "--force", str(target)) if force else ("worktree", "remove", str(target))
         self._run(repo, args, operation="remove_worktree")
 
     def _argv(self, args: Sequence[str]) -> tuple[str, ...]:
@@ -355,8 +351,7 @@ def _diagnostic(stdout: str | None, stderr: str | None) -> str:
     stdout_value = values["stdout"]
     assert stderr_value is not None and stdout_value is not None
     return (
-        f"stderr: {_bounded(stderr_value, limit=first_budget)}\n"
-        f"stdout: {_bounded(stdout_value, limit=second_budget)}"
+        f"stderr: {_bounded(stderr_value, limit=first_budget)}\nstdout: {_bounded(stdout_value, limit=second_budget)}"
     )
 
 

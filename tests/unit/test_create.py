@@ -17,9 +17,8 @@ from worktree_provisioner.application.contracts import (
     CreateRequest,
     CreateResult,
     ExpectedError,
-    GitWorktreeRecord,
 )
-from worktree_provisioner.application.ports import ApplicationPorts
+from worktree_provisioner.application.ports import ApplicationPorts, BootstrapGateway, GitGateway
 from worktree_provisioner.application.worktree_service import WorktreeService
 from worktree_provisioner.infra.environment import EnvironmentAdapter
 from worktree_provisioner.infra.filesystem import FilesystemCliGateway
@@ -27,8 +26,8 @@ from worktree_provisioner.infra.filesystem import FilesystemCliGateway
 
 def _ports(git, bootstrap, filesystem) -> ApplicationPorts:
     return ApplicationPorts(
-        git=git,
-        bootstrap=bootstrap,
+        git=cast("GitGateway", git),
+        bootstrap=cast("BootstrapGateway", bootstrap),
         filesystem=filesystem,
         environment=EnvironmentAdapter(),
     )
@@ -42,7 +41,7 @@ def test_create_uses_main_record_basename_and_current_branch(tmp_path: Path) -> 
     repo = tmp_path / "checkout"
     repo.mkdir()
     root = tmp_path / "root"
-    main = GitWorktreeRecord(path=repo, head="abc", branch="main")
+    main = FakeGitRecord(path=repo, head="abc", branch="main")
     git = FakeGitGateway(
         checkout_root=repo,
         current_branch="feature/current",
@@ -128,9 +127,7 @@ def test_unknown_git_add_failure_does_not_retry_or_cleanup(tmp_path: Path) -> No
     filesystem = FakeFilesystemGateway()
 
     with pytest.raises(ExpectedError) as caught:
-        WorktreeService(_ports(git, FakeBootstrapGateway(), filesystem)).create(
-            _request(repo, tmp_path / "root")
-        )
+        WorktreeService(_ports(git, FakeBootstrapGateway(), filesystem)).create(_request(repo, tmp_path / "root"))
 
     assert caught.value.code == "git_worktree_add_failed"
     assert caught.value.status == "error"
@@ -232,9 +229,7 @@ def test_invalid_generated_branch_ref_has_no_mutation(tmp_path: Path) -> None:
     filesystem = FakeFilesystemGateway()
 
     with pytest.raises(ExpectedError) as caught:
-        WorktreeService(_ports(git, bootstrap, filesystem)).create(
-            _request(repo, tmp_path / "root", bootstrap=True)
-        )
+        WorktreeService(_ports(git, bootstrap, filesystem)).create(_request(repo, tmp_path / "root", bootstrap=True))
 
     assert caught.value.code == "git_worktree_add_failed"
     assert not any(call[0] == "add_worktree" for call in git.calls)
@@ -269,9 +264,7 @@ def test_candidate_ceiling_is_finite_and_patchable(monkeypatch: pytest.MonkeyPat
 
 
 @pytest.mark.parametrize("status", ["detection_failed", "failed"])
-def test_bootstrap_detection_and_execution_failures_are_partial_without_rollback(
-    tmp_path: Path, status: str
-) -> None:
+def test_bootstrap_detection_and_execution_failures_are_partial_without_rollback(tmp_path: Path, status: str) -> None:
     repo = tmp_path / "checkout"
     repo.mkdir()
     git = FakeGitGateway(checkout_root=repo, records=[FakeGitRecord(path=repo)], branches={"main"})
@@ -281,9 +274,7 @@ def test_bootstrap_detection_and_execution_failures_are_partial_without_rollback
     filesystem = FakeFilesystemGateway()
 
     with pytest.raises(ExpectedError) as caught:
-        WorktreeService(_ports(git, bootstrap, filesystem)).create(
-            _request(repo, tmp_path / "root", bootstrap=True)
-        )
+        WorktreeService(_ports(git, bootstrap, filesystem)).create(_request(repo, tmp_path / "root", bootstrap=True))
 
     error = caught.value
     assert error.code == ("bootstrap_detection_failed" if status == "detection_failed" else "bootstrap_failed")
@@ -299,9 +290,7 @@ def test_bootstrap_detection_and_execution_failures_are_partial_without_rollback
     ("detail", "exit_code"),
     [("make executable was not found", None), ("missing.mk: No such file", 2)],
 )
-def test_bootstrap_detection_failure_variants_are_partial(
-    tmp_path: Path, detail: str, exit_code: int | None
-) -> None:
+def test_bootstrap_detection_failure_variants_are_partial(tmp_path: Path, detail: str, exit_code: int | None) -> None:
     repo = tmp_path / "checkout"
     repo.mkdir()
     git = FakeGitGateway(checkout_root=repo, records=[FakeGitRecord(path=repo)], branches={"main"})
@@ -311,9 +300,7 @@ def test_bootstrap_detection_failure_variants_are_partial(
     filesystem = FakeFilesystemGateway()
 
     with pytest.raises(ExpectedError) as caught:
-        WorktreeService(_ports(git, bootstrap, filesystem)).create(
-            _request(repo, tmp_path / "root", bootstrap=True)
-        )
+        WorktreeService(_ports(git, bootstrap, filesystem)).create(_request(repo, tmp_path / "root", bootstrap=True))
 
     assert caught.value.code == "bootstrap_detection_failed"
     assert caught.value.status == "partial"

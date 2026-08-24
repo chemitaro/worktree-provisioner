@@ -284,6 +284,7 @@ class CreateRequest:
     label: str | None
     bootstrap_enabled: bool
 
+
 @dataclass(frozen=True)
 class CreateResult:
     id: str
@@ -294,16 +295,19 @@ class CreateResult:
     bootstrap: BootstrapResult
     artifacts: ArtifactState
 
+
 @dataclass(frozen=True)
 class ListRequest:
     repo_root: Path
     root: Path
+
 
 @dataclass(frozen=True)
 class ShowRequest:
     repo_root: Path
     root: Path
     target: str
+
 
 @dataclass(frozen=True)
 class RemoveRequest:

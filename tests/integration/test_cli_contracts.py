@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from conftest import CliResult, TempGitRepository
 
 
-def _payload(result: CliResult, json_loads: object) -> dict[str, object]:
-    assert callable(json_loads)
-    return json_loads(result.stdout)  # type: ignore[operator]
+def _payload(result: CliResult, json_loads: Callable[[str], dict[str, Any]]) -> dict[str, Any]:
+    return json_loads(result.stdout)
 
 
 def _add_worktree(repo: TempGitRepository, path: Path, branch: str) -> Path:
