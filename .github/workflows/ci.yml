@@ -36,7 +36,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-          cache: uv
 
       - name: Sync locked development environment
         run: uv sync --locked --all-groups
