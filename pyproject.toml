@@ -1,0 +1,36 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "worktree-provisioner"
+version = "0.1.0"
+description = "Create centrally managed Git linked worktrees with collision-safe naming"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "worktree-provisioner contributors" }]
+dependencies = []
+
+[project.scripts]
+worktree-provisioner = "worktree_provisioner.cli:main"
+
+[dependency-groups]
+dev = [
+  "pytest>=8.0",
+  "ruff>=0.12.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/worktree_provisioner"]
+
