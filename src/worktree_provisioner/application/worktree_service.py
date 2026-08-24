@@ -1,24 +1,33 @@
-"""Create application service for Git linked worktrees.
+"""Application service for Git linked worktree lifecycle operations.
 
-This phase owns the create vertical slice only.  Inventory, target
-resolution, and removal are intentionally left to later phase owners; the
-service nevertheless keeps all create-side state in the shared P3 contracts
-so the later command family can consume it without a compatibility shim.
+The service currently owns the create and inventory/show vertical slices;
+managed removal is added by the following implementation phase.
 """
 
 from __future__ import annotations
 
+import builtins
+import os
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
 from worktree_provisioner.application.contracts import (
     ArtifactState,
+    BlockerCode,
     BootstrapResult,
     CreateRequest,
     CreateResult,
     ExpectedError,
     GitWorktreeRecord,
+    ListRequest,
+    ListResult,
+    Operation,
+    ShowRequest,
+    ShowResult,
+    WorktreeOrigin,
+    WorktreeRecordView,
 )
 from worktree_provisioner.application.ports import ApplicationPorts
 from worktree_provisioner.application.root_and_naming import (
@@ -34,13 +43,22 @@ from worktree_provisioner.application.root_and_naming import (
     validate_namespace,
     validate_root,
 )
+from worktree_provisioner.application.target_resolver import TargetResolutionError, resolve_target
 
 _DETECTION_COMMAND: Final[tuple[str, ...]] = ("make", "-n", "init")
 _DIAGNOSTIC_LIMIT: Final[int] = 4096
 
 
+@dataclass(frozen=True, slots=True)
+class _NamespaceContext:
+    namespace: Path
+    available: bool
+    reason: str
+    exists: bool
+
+
 class WorktreeService:
-    """Application service implementing create and bootstrap semantics."""
+    """Application service implementing create, inventory, and show semantics."""
 
     def __init__(self, ports: ApplicationPorts) -> None:
         self.ports = ports
@@ -174,16 +192,206 @@ class WorktreeService:
             )
         return result
 
-    def _resolve_root(self, root: Path) -> Path:
+    def list(self, request: ListRequest) -> ListResult:
+        """Return the complete Git inventory with safety classification."""
+
+        root = self._resolve_root(request.root, operation="list")
+        records = self._worktree_records(request.repo_root, operation="list")
+        return ListResult(self._inventory_views(request.repo_root, root, records, operation="list"))
+
+    def show(self, request: ShowRequest) -> ShowResult:
+        """Resolve one target from a fresh inventory snapshot."""
+
+        listed = self.list(ListRequest(repo_root=request.repo_root, root=request.root))
+        try:
+            record = resolve_target(listed.worktrees, request.target)
+        except TargetResolutionError as exc:
+            raise self._error(
+                code=exc.code,
+                message=str(exc),
+                details=exc.details,
+                operation="show",
+            ) from exc
+        return ShowResult(target=request.target, worktree=record)
+
+    def _inventory_views(
+        self,
+        repo_root: Path,
+        root: Path,
+        records: Sequence[GitWorktreeRecord],
+        *,
+        operation: Operation,
+    ) -> tuple[WorktreeRecordView, ...]:
+        if not records:
+            return ()
+
+        main_path = _record_canonical_path(records[0])
+        repo_basename = main_path.name
+        if not repo_basename:
+            raise self._error(
+                code="git_worktree_list_failed",
+                message="main worktree record has no repository basename",
+                details={"path": str(main_path)},
+                operation=operation,
+            )
+        namespace = self._namespace_context(root, repo_basename, operation=operation)
+        current_path = canonical_path(repo_root)
+
+        provisional: list[tuple[GitWorktreeRecord, bool, bool, bool, str, str, bool, bool]] = []
+        for index, record in enumerate(records):
+            path = _record_path(record)
+            canonical_record_path = _record_canonical_path(record)
+            main = index == 0
+            current = canonical_record_path == current_path
+            path_exists = _observe_path(self.ports.filesystem, path)
+            managed = namespace.available and namespace.exists and self._is_managed_path(path, namespace.namespace)
+            raw_id = self._raw_inventory_id(
+                record,
+                is_main=main,
+                managed=managed,
+                repo_basename=repo_basename,
+            )
+            provisional.append(
+                (
+                    record,
+                    main,
+                    current,
+                    path_exists is True,
+                    raw_id,
+                    canonical_record_path.as_posix(),
+                    managed,
+                    namespace.available,
+                )
+            )
+
+        stable_ids = _disambiguate_ids(provisional)
+        views: list[WorktreeRecordView] = []
+        for index, (record, main, current, path_exists, _raw_id, _sort_path, managed, available) in enumerate(
+            provisional
+        ):
+            blockers = _remove_blockers(
+                main=main,
+                current=current,
+                bare=record.bare,
+                locked=record.locked,
+                path_exists=path_exists,
+                managed=managed,
+                classification_available=available,
+            )
+            origin: WorktreeOrigin
+            if not available:
+                origin = "classification_unavailable"
+            elif managed:
+                origin = "managed_namespace"
+            else:
+                origin = "external"
+            views.append(
+                WorktreeRecordView(
+                    id=stable_ids[index],
+                    path=_absolute_lexical_path(_record_path(record)),
+                    basename=_record_path(record).name,
+                    branch=record.branch,
+                    head=record.head,
+                    detached=record.detached,
+                    bare=record.bare,
+                    locked=record.locked,
+                    lock_reason=record.lock_reason,
+                    main=main,
+                    current=current,
+                    path_exists=path_exists,
+                    record_exists=True,
+                    managed=managed,
+                    classification_available=available,
+                    classification_reason="root_valid" if available else "namespace_symlink",
+                    origin=origin,
+                    removable=not blockers,
+                    remove_blockers=blockers,
+                )
+            )
+        return tuple(views)
+
+    def _namespace_context(self, root: Path, repo_basename: str, *, operation: Operation) -> _NamespaceContext:
+        namespace = root / repo_basename
+        try:
+            kind = self.ports.filesystem.lstat_kind(namespace)
+        except Exception as exc:
+            raise self._error(
+                code="unsafe_namespace",
+                message=f"failed to inspect managed namespace: {namespace}",
+                details={"namespace": str(namespace), "diagnostic": _bounded(str(exc))},
+                operation=operation,
+            ) from exc
+        if kind == "symlink":
+            return _NamespaceContext(namespace=namespace, available=False, reason="namespace_symlink", exists=False)
+        if kind == "missing":
+            return _NamespaceContext(namespace=namespace, available=True, reason="root_valid", exists=False)
+        if kind == "directory":
+            return _NamespaceContext(namespace=namespace, available=True, reason="root_valid", exists=True)
+        raise self._error(
+            code="unsafe_namespace",
+            message=f"managed namespace is not a real directory: {namespace}",
+            details={"namespace": str(namespace), "reason": kind},
+            operation=operation,
+        )
+
+    def _is_managed_path(self, path: Path, namespace: Path) -> bool:
+        lexical_path = _absolute_lexical_path(path)
+        lexical_namespace = _absolute_lexical_path(namespace)
+        if not _is_strict_descendant(lexical_path, lexical_namespace):
+            return False
+        canonical_namespace = canonical_path(namespace)
+        canonical_record = canonical_path(path)
+        if not _is_strict_descendant(canonical_record, canonical_namespace):
+            return False
+        try:
+            relative = lexical_path.relative_to(lexical_namespace)
+        except ValueError:
+            return False
+        current = lexical_namespace
+        for part in relative.parts:
+            current /= part
+            try:
+                kind = self.ports.filesystem.lstat_kind(current)
+            except Exception:
+                return False
+            if kind == "symlink":
+                return False
+            if kind == "missing":
+                # A stale Git record may have no path at all.  No existing
+                # component can redirect it once the canonical check passed.
+                break
+            if kind == "other":
+                return False
+        return True
+
+    @staticmethod
+    def _raw_inventory_id(
+        record: GitWorktreeRecord,
+        *,
+        is_main: bool,
+        managed: bool,
+        repo_basename: str,
+    ) -> str:
+        if is_main:
+            return "main"
+        basename = record.path.name or "worktree"
+        if managed and basename.startswith(f"{repo_basename}-"):
+            suffix = basename[len(repo_basename) + 1 :]
+            if suffix:
+                return suffix
+        return basename
+
+    def _resolve_root(self, root: Path, *, operation: Operation = "create") -> Path:
         try:
             return validate_root(root, self.ports.filesystem, allow_missing=True)
         except RootResolutionError as exc:
-            raise self._error(code=exc.code, message=str(exc), details=exc.details) from exc
+            raise self._error(code=exc.code, message=str(exc), details=exc.details, operation=operation) from exc
         except Exception as exc:
             raise self._error(
                 code="invalid_root",
                 message=f"failed to inspect worktree root: {root}",
                 details={"root": str(root), "diagnostic": _bounded(str(exc))},
+                operation=operation,
             ) from exc
 
     def _current_branch(self, repo_root: Path) -> str:
@@ -203,7 +411,9 @@ class WorktreeService:
             )
         return branch
 
-    def _worktree_records(self, repo_root: Path) -> list[GitWorktreeRecord]:
+    def _worktree_records(
+        self, repo_root: Path, *, operation: Operation = "create"
+    ) -> builtins.list[GitWorktreeRecord]:
         try:
             return list(self.ports.git.worktree_list(repo_root))
         except Exception as exc:
@@ -211,6 +421,7 @@ class WorktreeService:
                 code="git_worktree_list_failed",
                 message="failed to list Git worktrees",
                 details={"diagnostic": _bounded(str(exc))},
+                operation=operation,
             ) from exc
 
     def _select_candidate(
@@ -378,7 +589,7 @@ class WorktreeService:
             record_exists = any(_record_canonical_path(record) == target for record in records)
         return ArtifactState(container_exists, worktree_path_exists, branch_exists, record_exists)
 
-    def _try_refresh_records(self, repo_root: Path) -> list[GitWorktreeRecord] | None:
+    def _try_refresh_records(self, repo_root: Path) -> builtins.list[GitWorktreeRecord] | None:
         try:
             return list(self.ports.git.worktree_list(repo_root))
         except Exception:
@@ -394,7 +605,7 @@ class WorktreeService:
         main_worktree_path: Path,
         repo_basename: str,
         namespace: Path,
-        records: list[GitWorktreeRecord],
+        records: builtins.list[GitWorktreeRecord],
         failed_candidate: WorktreeCandidate,
     ) -> CreateResult:
         """Continue a recognised add collision without recursive call growth."""
@@ -499,13 +710,14 @@ class WorktreeService:
         details: Mapping[str, object],
         result: object | None = None,
         status: str = "error",
+        operation: Operation = "create",
     ) -> ExpectedError:
         # The typed Literal contract is intentionally enforced at the shared
         # boundary; local adapter diagnostics cannot invent a public status.
         response_status = "partial" if status == "partial" else "error"
         return ExpectedError(
             code=code,  # type: ignore[arg-type]
-            operation="create",
+            operation=operation,
             message=message,
             details=details,
             result=result,
@@ -528,6 +740,75 @@ def _record_path(record: object) -> Path:
 
 def _record_canonical_path(record: object) -> Path:
     return canonical_path(_record_path(record))
+
+
+def _absolute_lexical_path(path: Path) -> Path:
+    """Make an absolute path without resolving symlink components."""
+
+    return Path(os.path.abspath(str(path)))
+
+
+def _is_strict_descendant(path: Path, parent: Path) -> bool:
+    return path != parent and parent in path.parents
+
+
+def _disambiguate_ids(
+    provisional: Sequence[tuple[GitWorktreeRecord, bool, bool, bool, str, str, bool, bool]],
+) -> list[str]:
+    """Suffix duplicate raw ids by canonical path order, preserving list order."""
+
+    groups: dict[str, list[tuple[int, str]]] = {}
+    assigned: list[str | None] = [None] * len(provisional)
+    used: set[str] = set()
+    # The first Git record is the actual main worktree and must retain the
+    # reserved selector ``main`` even if another record's basename is also
+    # ``main`` and would sort before it lexically.
+    for index, item in enumerate(provisional):
+        if item[1]:
+            assigned[index] = "main"
+            used.add("main")
+            continue
+        groups.setdefault(item[4], []).append((index, item[5]))
+    for raw_id in sorted(groups):
+        ordered = sorted(groups[raw_id], key=lambda value: value[1])
+        for ordinal, (index, _sort_path) in enumerate(ordered, start=1):
+            candidate = raw_id if ordinal == 1 else f"{raw_id}~{ordinal}"
+            suffix = ordinal
+            while candidate in used:
+                suffix += 1
+                candidate = f"{raw_id}~{suffix}"
+            used.add(candidate)
+            assigned[index] = candidate
+    return [value if value is not None else "worktree" for value in assigned]
+
+
+def _remove_blockers(
+    *,
+    main: bool,
+    current: bool,
+    bare: bool,
+    locked: bool,
+    path_exists: bool,
+    managed: bool,
+    classification_available: bool,
+) -> tuple[BlockerCode, ...]:
+    blockers: list[BlockerCode] = []
+    if main:
+        blockers.append("main_worktree")
+    if current:
+        blockers.append("current_worktree")
+    if bare:
+        blockers.append("bare_worktree")
+    if locked:
+        blockers.append("locked_worktree")
+    if not path_exists:
+        blockers.append("path_missing")
+    if classification_available:
+        if not managed:
+            blockers.append("outside_managed_namespace")
+    else:
+        blockers.append("classification_unavailable")
+    return tuple(blockers)
 
 
 def _observe_path(filesystem: object, path: Path) -> bool | None:

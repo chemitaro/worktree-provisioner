@@ -1,9 +1,4 @@
-"""Command-line composition root for the create vertical slice.
-
-P4 wires ``create`` end-to-end.  The other command names are registered in
-the parser so the package advertises the planned command family; inventory,
-target resolution, and removal are intentionally supplied by later phases.
-"""
+"""Command-line composition root for the worktree lifecycle commands."""
 
 from __future__ import annotations
 
@@ -21,6 +16,10 @@ from worktree_provisioner.application.contracts import (
     CreateResult,
     ErrorCode,
     ExpectedError,
+    ListRequest,
+    ListResult,
+    ShowRequest,
+    ShowResult,
 )
 from worktree_provisioner.application.ports import ApplicationPorts
 from worktree_provisioner.application.root_and_naming import RootResolutionError, select_root
@@ -63,7 +62,7 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.command != "create":
+    if args.command == "remove":
         return _emit_error(
             ExpectedError(
                 code="usage_error",
@@ -89,7 +88,7 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as exc:
             raise ExpectedError(
                 code=_repository_error_code(exc),
-                operation="create",
+                operation=args.command,
                 message="failed to resolve the invocation repository",
                 details={"diagnostic": _bounded(str(exc))},
                 result=None,
@@ -100,26 +99,32 @@ def main(argv: list[str] | None = None) -> int:
         except RootResolutionError as exc:
             raise ExpectedError(
                 code=exc.code,  # type: ignore[arg-type]
-                operation="create",
+                operation=args.command,
                 message=str(exc),
                 details=exc.details,
                 result=None,
                 status="error",
             ) from exc
-        result = WorktreeService(ports).create(
-            CreateRequest(
-                repo_root=repo_root,
-                root=root,
-                label=args.label,
-                bootstrap_enabled=not args.no_bootstrap,
+        service = WorktreeService(ports)
+        if args.command == "create":
+            result: CreateResult | ListResult | ShowResult = service.create(
+                CreateRequest(
+                    repo_root=repo_root,
+                    root=root,
+                    label=args.label,
+                    bootstrap_enabled=not args.no_bootstrap,
+                )
             )
-        )
+        elif args.command == "list":
+            result = service.list(ListRequest(repo_root=repo_root, root=root))
+        else:
+            result = service.show(ShowRequest(repo_root=repo_root, root=root, target=args.target))
     except ExpectedError as exc:
         return _emit_error(exc, json_mode=json_mode)
     except Exception as exc:
         internal = ExpectedError(
             code="internal_error",
-            operation="create",
+            operation=args.command,
             message="unexpected internal error",
             details={"diagnostic": _bounded(str(exc))},
             result=None,
@@ -131,15 +136,15 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _emit_success(result: CreateResult, *, json_mode: bool) -> None:
+def _emit_success(result: CreateResult | ListResult | ShowResult, *, json_mode: bool) -> None:
     if json_mode:
         print(
             json.dumps(
                 {
                     "schema_version": 1,
                     "status": "ok",
-                    "operation": "create",
-                    "result": _create_payload(result),
+                    "operation": _result_operation(result),
+                    "result": _result_payload(result),
                     "error": None,
                     "warnings": [],
                 },
@@ -147,13 +152,21 @@ def _emit_success(result: CreateResult, *, json_mode: bool) -> None:
             )
         )
         return
-    print(
-        "worktree-provisioner: ok (create) "
-        f"id={result.id} branch={result.branch} path={result.worktree_path}"
-    )
-    command = " ".join(result.bootstrap.command) if result.bootstrap.command else "-"
-    exit_code = "" if result.bootstrap.exit_code is None else f" exit_code={result.bootstrap.exit_code}"
-    print(f"worktree-provisioner: bootstrap status={result.bootstrap.status} command={command}{exit_code}")
+    if isinstance(result, CreateResult):
+        print(f"worktree-provisioner: ok (create) id={result.id} branch={result.branch} path={result.worktree_path}")
+        command = " ".join(result.bootstrap.command) if result.bootstrap.command else "-"
+        exit_code = "" if result.bootstrap.exit_code is None else f" exit_code={result.bootstrap.exit_code}"
+        print(f"worktree-provisioner: bootstrap status={result.bootstrap.status} command={command}{exit_code}")
+    elif isinstance(result, ListResult):
+        print(f"worktree-provisioner: ok (list) count={len(result.worktrees)}")
+        for worktree in result.worktrees:
+            branch = worktree.branch or "-"
+            print(f"{worktree.id}\t{branch}\t{worktree.path}")
+    else:
+        print(
+            "worktree-provisioner: ok (show) "
+            f"id={result.worktree.id} branch={result.worktree.branch or '-'} path={result.worktree.path}"
+        )
 
 
 def _emit_error(error: ExpectedError, *, json_mode: bool) -> int:
@@ -201,10 +214,30 @@ def _create_payload(result: CreateResult) -> dict[str, object]:
     }
 
 
+def _list_payload(result: ListResult) -> dict[str, object]:
+    return {"worktrees": [_json_safe(worktree) for worktree in result.worktrees]}
+
+
+def _show_payload(result: ShowResult) -> dict[str, object]:
+    return {"target": result.target, "worktree": _json_safe(result.worktree)}
+
+
 def _result_payload(result: object | None) -> object | None:
     if isinstance(result, CreateResult):
         return _create_payload(result)
+    if isinstance(result, ListResult):
+        return _list_payload(result)
+    if isinstance(result, ShowResult):
+        return _show_payload(result)
     return _json_safe(result)
+
+
+def _result_operation(result: CreateResult | ListResult | ShowResult) -> str:
+    if isinstance(result, CreateResult):
+        return "create"
+    if isinstance(result, ListResult):
+        return "list"
+    return "show"
 
 
 def _bootstrap_payload(result: BootstrapResult) -> dict[str, object]:
