@@ -18,11 +18,7 @@ from worktree_provisioner.application.ports import EnvironmentGateway, Filesyste
 ROOT_ENVIRONMENT: Final[str] = "WORKTREE_PROVISIONER_ROOT"
 LABEL_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[a-z0-9-]+$")
 MAX_CANDIDATE_ATTEMPTS: Final[int] = 10_000
-RETRYABLE_GIT_ERROR_FRAGMENTS: Final[tuple[str, ...]] = (
-    "already exists",
-    "is already checked out",
-    "a branch named",
-)
+RETRYABLE_GIT_COLLISION_KINDS: Final[frozenset[str]] = frozenset({"branch", "path", "checked_out"})
 
 
 class RootResolutionError(ValueError):
@@ -232,14 +228,16 @@ def canonical_path(path: Path) -> Path:
 
 
 def is_retryable_git_collision(error: BaseException) -> bool:
-    """Recognize only the bounded, known Git collision diagnostics."""
+    """Recognize only an adapter-provided, operation-specific collision.
 
-    values = [str(error)]
-    diagnostic = getattr(error, "diagnostic", None)
-    if isinstance(diagnostic, str):
-        values.append(diagnostic)
-    lowered = "\n".join(values).lower()
-    return any(fragment in lowered for fragment in RETRYABLE_GIT_ERROR_FRAGMENTS)
+    Human-readable Git output is deliberately not a retry signal.  In
+    particular, generic phrases such as ``already exists`` also occur for
+    ref-lock, permission, and I/O failures.  Concrete adapters must provide a
+    typed ``collision_kind`` after their own fail-closed classification.
+    """
+
+    collision_kind = getattr(error, "collision_kind", None)
+    return isinstance(collision_kind, str) and collision_kind in RETRYABLE_GIT_COLLISION_KINDS
 
 
 def _canonical_root(root: Path) -> Path:
@@ -256,7 +254,7 @@ def _canonical_root(root: Path) -> Path:
 __all__ = [
     "LABEL_PATTERN",
     "MAX_CANDIDATE_ATTEMPTS",
-    "RETRYABLE_GIT_ERROR_FRAGMENTS",
+    "RETRYABLE_GIT_COLLISION_KINDS",
     "ROOT_ENVIRONMENT",
     "LabelValidationError",
     "RootResolutionError",

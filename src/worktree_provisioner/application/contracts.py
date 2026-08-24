@@ -27,6 +27,7 @@ WorktreeOrigin: TypeAlias = Literal[
     "classification_unavailable",
 ]
 Operation: TypeAlias = Literal["create", "list", "show", "remove"]
+CollisionKind: TypeAlias = Literal["branch", "path", "checked_out"]
 
 ErrorCode: TypeAlias = Literal[
     "usage_error",

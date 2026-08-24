@@ -14,6 +14,7 @@ from conftest import (  # type: ignore[import-not-found]
 )
 
 from worktree_provisioner.application.contracts import (
+    BootstrapResult,
     CreateRequest,
     CreateResult,
     ExpectedError,
@@ -22,6 +23,7 @@ from worktree_provisioner.application.ports import ApplicationPorts, BootstrapGa
 from worktree_provisioner.application.worktree_service import WorktreeService
 from worktree_provisioner.infra.environment import EnvironmentAdapter
 from worktree_provisioner.infra.filesystem import FilesystemCliGateway
+from worktree_provisioner.infra.git_cli import GitAdapterError
 
 
 def _ports(git, bootstrap, filesystem) -> ApplicationPorts:
@@ -96,6 +98,45 @@ def test_successful_bootstrap_states_return_complete_result(tmp_path: Path, stat
     assert result.bootstrap.requested is True
 
 
+@pytest.mark.parametrize(
+    ("status", "exit_code", "partial"),
+    [("succeeded", 0, False), ("detection_failed", 2, True), ("failed", 7, True)],
+)
+def test_bootstrap_terminal_result_reobserves_mutated_artifacts(
+    tmp_path: Path, status: str, exit_code: int, partial: bool
+) -> None:
+    repo = tmp_path / "checkout"
+    repo.mkdir()
+    git = FakeGitGateway(checkout_root=repo, records=[FakeGitRecord(path=repo)], branches={"main"})
+    filesystem = FakeFilesystemGateway()
+
+    class MutatingBootstrap(FakeBootstrapGateway):
+        def run_make_init_if_available(self, worktree_path: Path) -> BootstrapResult:
+            self.calls.append(worktree_path)
+            add_call = next(call for call in reversed(git.calls) if call[0] == "add_worktree")
+            branch = cast(str, add_call[2]["branch"])
+            git.branches.discard(branch)
+            git.records = []
+            filesystem.existing.add(worktree_path)
+            return super().run_make_init_if_available(worktree_path)
+
+    bootstrap = MutatingBootstrap(result=FakeBootstrapResult(status=status, exit_code=exit_code))
+    service = WorktreeService(_ports(git, bootstrap, filesystem))
+
+    if partial:
+        with pytest.raises(ExpectedError) as caught:
+            service.create(_request(repo, tmp_path / "root", bootstrap=True))
+        result = cast("CreateResult", caught.value.result)
+    else:
+        result = service.create(_request(repo, tmp_path / "root", bootstrap=True))
+
+    assert result.artifacts.container_exists is True
+    assert result.artifacts.worktree_path_exists is True
+    assert result.artifacts.branch_exists is False
+    assert result.artifacts.worktree_record_exists is False
+    assert result.bootstrap.status == status
+
+
 def test_bootstrap_failure_is_partial_with_retained_result(tmp_path: Path) -> None:
     repo = tmp_path / "checkout"
     repo.mkdir()
@@ -150,7 +191,12 @@ class RetryOnceGit(FakeGitGateway):
         self._record("add_worktree", repo_root, path=path, branch=branch)
         self.attempts += 1
         if self.attempts == 1:
-            raise RuntimeError("fatal: a branch named 'main-wt1' already exists")
+            raise GitAdapterError(
+                operation="add_worktree",
+                argv=("git", "worktree", "add"),
+                message="known branch collision",
+                collision_kind="branch",
+            )
         self.branches.add(branch)
         self.records.append(FakeGitRecord(path=path, branch=branch))
 
@@ -166,6 +212,63 @@ def test_known_git_collision_retries_next_candidate(tmp_path: Path) -> None:
     assert result.id == "wt2"
     assert result.branch == "main-wt2"
     assert git.attempts == 2
+
+
+def test_generic_collision_fragment_is_not_a_retry_signal(tmp_path: Path) -> None:
+    repo = tmp_path / "checkout"
+    repo.mkdir()
+    git = FakeGitGateway(
+        checkout_root=repo,
+        records=[FakeGitRecord(path=repo)],
+        branches={"main"},
+        add_error=GitAdapterError(
+            operation="add_worktree",
+            argv=("git", "worktree", "add"),
+            message="unknown Git failure",
+            diagnostic="fatal: ref lock already exists",
+        ),
+    )
+    filesystem = FakeFilesystemGateway()
+
+    with pytest.raises(ExpectedError) as caught:
+        WorktreeService(_ports(git, FakeBootstrapGateway(), filesystem)).create(_request(repo, tmp_path / "root"))
+
+    assert caught.value.code == "git_worktree_add_failed"
+    assert sum(1 for call in git.calls if call[0] == "add_worktree") == 1
+    assert cast("dict[str, object]", caught.value.details["artifacts"]) == {
+        "container_exists": True,
+        "worktree_path_exists": False,
+        "branch_exists": False,
+        "worktree_record_exists": False,
+    }
+
+
+@dataclass
+class PartialTypedCollisionGit(FakeGitGateway):
+    def add_worktree(self, repo_root: Path, *, path: Path, branch: str) -> None:
+        self._record("add_worktree", repo_root, path=path, branch=branch)
+        self.branches.add(branch)
+        raise GitAdapterError(
+            operation="add_worktree",
+            argv=("git", "worktree", "add"),
+            message="typed collision with partial branch",
+            collision_kind="branch",
+        )
+
+
+def test_typed_collision_with_observed_artifact_is_not_retried(tmp_path: Path) -> None:
+    repo = tmp_path / "checkout"
+    repo.mkdir()
+    git = PartialTypedCollisionGit(checkout_root=repo, records=[FakeGitRecord(path=repo)], branches={"main"})
+    filesystem = FakeFilesystemGateway()
+
+    with pytest.raises(ExpectedError) as caught:
+        WorktreeService(_ports(git, FakeBootstrapGateway(), filesystem)).create(_request(repo, tmp_path / "root"))
+
+    assert caught.value.code == "git_worktree_add_failed"
+    assert sum(1 for call in git.calls if call[0] == "add_worktree") == 1
+    artifacts = cast("dict[str, object]", caught.value.details["artifacts"])
+    assert artifacts["branch_exists"] is True
 
 
 def test_detached_current_head_is_rejected_before_mutation(tmp_path: Path) -> None:

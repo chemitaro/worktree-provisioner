@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 import subprocess
 from collections.abc import Sequence
 from pathlib import Path
@@ -118,6 +119,55 @@ def test_make_init_failure_is_failed_and_diagnostic_is_bounded(tmp_path: Path, m
     assert len(result.detail) <= 4096
     assert "stderr:" in result.detail
     assert "stdout:" in result.detail
+
+
+def test_make_diagnostic_redacts_representative_secrets_before_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "Makefile").write_text("init:\n", encoding="utf-8")
+    secrets = {
+        "token-value-123",
+        "password-value-456",
+        "secret-value-789",
+        "api-key-value-abc",
+        "authorization-assignment-value-jkl",
+        "authorization-value-def",
+        "bearer-value-ghi",
+    }
+    diagnostic = (
+        "TOKEN=token-value-123 PASSWORD: password-value-456 SECRET=secret-value-789 "
+        "API_KEY=api-key-value-abc Authorization=authorization-assignment-value-jkl "
+        "Authorization: Bearer authorization-value-def "
+        "Bearer bearer-value-ghi\n" + "x" * 20_000
+    )
+    _calls, runner = _runner_for([_completed(0), _completed(7, stdout=diagnostic, stderr=diagnostic)])
+    monkeypatch.setattr("worktree_provisioner.infra.make_cli.shutil.which", lambda _: "/usr/bin/make")
+
+    result = MakeCliGateway(runner=runner).run_make_init_if_available(tmp_path)
+
+    assert result.status == "failed"
+    assert result.detail is not None
+    assert len(result.detail) <= 4096
+    for secret in secrets:
+        assert secret not in result.detail
+    assert "[REDACTED]" in result.detail
+
+
+def test_real_make_capture_is_bounded_and_redacted(tmp_path: Path) -> None:
+    if shutil.which("make") is None:
+        pytest.skip("make is unavailable")
+    (tmp_path / "Makefile").write_text(
+        "init:\n\t@printf 'TOKEN=real-secret-value\\n' >&2\n\t@yes x | head -c 200000 >&2\n\t@exit 7\n",
+        encoding="utf-8",
+    )
+
+    result = MakeCliGateway().run_make_init_if_available(tmp_path)
+
+    assert result.status == "failed"
+    assert result.detail is not None
+    assert len(result.detail) <= 4096
+    assert "real-secret-value" not in result.detail
+    assert "[REDACTED]" in result.detail
 
 
 def test_make_runner_start_failure_is_reported_as_failed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

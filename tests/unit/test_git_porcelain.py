@@ -145,6 +145,35 @@ def test_git_gateway_uses_exact_argv_and_preserves_paths(tmp_path: Path, monkeyp
     assert all(kwargs["cwd"] == repo for _, kwargs in calls)
 
 
+@pytest.mark.parametrize(
+    ("stderr", "expected"),
+    [
+        ("fatal: a branch named 'feature' already exists\n", "branch"),
+        ("fatal: '/tmp/worktree' already exists\n", "path"),
+        ("fatal: 'feature' is already used by worktree at '/tmp/other'\n", "checked_out"),
+        ("fatal: 'feature' is already checked out at '/tmp/other'\n", "checked_out"),
+        ("fatal: ref lock already exists\n", None),
+    ],
+)
+def test_add_worktree_exposes_only_operation_specific_collision_kind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stderr: str, expected: str | None
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    target = Path("/tmp/worktree")
+
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 128, stdout="", stderr=stderr)
+
+    monkeypatch.setattr("worktree_provisioner.infra.git_cli.shutil.which", lambda _: "/usr/bin/git")
+    monkeypatch.setattr("worktree_provisioner.infra.git_cli.subprocess.run", fake_run)
+
+    with pytest.raises(GitAdapterError) as caught:
+        GitCliGateway().add_worktree(repo, path=target, branch="feature")
+
+    assert caught.value.collision_kind == expected
+
+
 def test_branch_checks_return_false_for_expected_negative_status(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

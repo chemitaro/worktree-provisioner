@@ -122,7 +122,11 @@ class WorktreeService:
                 branch=candidate.branch,
             )
         except Exception as exc:
-            if is_retryable_git_collision(exc):
+            # Inspect the failed candidate before deciding whether to retry.
+            # A typed collision that left any observable artifact is
+            # fail-closed: retrying would hide a partial Git mutation.
+            artifacts = self._observe_artifacts(request.repo_root, candidate, namespace)
+            if is_retryable_git_collision(exc) and _artifacts_are_absent(artifacts):
                 refreshed = self._try_refresh_records(request.repo_root)
                 if refreshed is not None:
                     # A recognised race is the only path allowed to retry.
@@ -139,7 +143,6 @@ class WorktreeService:
                         records=refreshed,
                         failed_candidate=candidate,
                     )
-            artifacts = self._observe_artifacts(request.repo_root, candidate, namespace)
             raise self._error(
                 code="git_worktree_add_failed",
                 message=f"git worktree add failed for {candidate.id}",
@@ -163,6 +166,7 @@ class WorktreeService:
             return result
 
         bootstrap = self._run_bootstrap(candidate.path)
+        artifacts = self._observe_artifacts(request.repo_root, candidate, namespace)
         result = CreateResult(
             id=result.id,
             main_worktree_path=result.main_worktree_path,
@@ -170,7 +174,7 @@ class WorktreeService:
             worktree_path=result.worktree_path,
             branch=result.branch,
             bootstrap=bootstrap,
-            artifacts=result.artifacts,
+            artifacts=artifacts,
         )
         if bootstrap.status == "detection_failed":
             raise self._error(
@@ -987,12 +991,12 @@ class WorktreeService:
                     branch=candidate.branch,
                 )
             except Exception as exc:
-                if is_retryable_git_collision(exc):
+                artifacts = self._observe_artifacts(request.repo_root, candidate, namespace)
+                if is_retryable_git_collision(exc) and _artifacts_are_absent(artifacts):
                     refreshed = self._try_refresh_records(request.repo_root)
                     if refreshed is not None:
                         known_paths = {_record_canonical_path(record) for record in refreshed}
                         continue
-                artifacts = self._observe_artifacts(request.repo_root, candidate, namespace)
                 raise self._error(
                     code="git_worktree_add_failed",
                     message=f"git worktree add failed for {candidate.id}",
@@ -1014,6 +1018,7 @@ class WorktreeService:
             if not request.bootstrap_enabled:
                 return result
             bootstrap = self._run_bootstrap(candidate.path)
+            artifacts = self._observe_artifacts(request.repo_root, candidate, namespace)
             result = CreateResult(
                 id=result.id,
                 main_worktree_path=result.main_worktree_path,
@@ -1021,7 +1026,7 @@ class WorktreeService:
                 worktree_path=result.worktree_path,
                 branch=result.branch,
                 bootstrap=bootstrap,
-                artifacts=result.artifacts,
+                artifacts=artifacts,
             )
             if bootstrap.status == "detection_failed":
                 raise self._error(
@@ -1212,6 +1217,16 @@ def _artifact_dict(result: ArtifactState) -> dict[str, bool | None]:
         "branch_exists": result.branch_exists,
         "worktree_record_exists": result.worktree_record_exists,
     }
+
+
+def _artifacts_are_absent(result: ArtifactState) -> bool:
+    """Return true only when all candidate artifact checks prove absence."""
+
+    return (
+        result.worktree_path_exists is False
+        and result.branch_exists is False
+        and result.worktree_record_exists is False
+    )
 
 
 def _git_repository_error_code(error: BaseException) -> str:

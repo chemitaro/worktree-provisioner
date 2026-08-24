@@ -9,6 +9,7 @@ belong to the application layer.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from collections.abc import Sequence
@@ -16,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from worktree_provisioner.application.contracts import GitWorktreeRecord
+from worktree_provisioner.application.contracts import CollisionKind, GitWorktreeRecord
 
 _GIT_COMMAND: Final[str] = "git"
 _DIAGNOSTIC_LIMIT: Final[int] = 4096
@@ -30,15 +31,18 @@ class GitAdapterError(RuntimeError):
     ``argv`` is retained as a tuple for diagnostics and tests, while
     ``diagnostic`` is already bounded so command output cannot become an
     unbounded error payload.  ``returncode`` is ``None`` when Git could not be
-    located or the process could not be started.
+    located or the process could not be started.  ``collision_kind`` is set
+    only by ``add_worktree`` after a strict, operation-specific classification;
+    callers must not infer retryability from ``diagnostic`` text.
     """
 
-    __slots__ = ("argv", "diagnostic", "operation", "returncode")
+    __slots__ = ("argv", "collision_kind", "diagnostic", "operation", "returncode")
 
     operation: str
     argv: tuple[str, ...]
     returncode: int | None
     diagnostic: str
+    collision_kind: CollisionKind | None
 
     def __init__(
         self,
@@ -48,11 +52,13 @@ class GitAdapterError(RuntimeError):
         message: str,
         returncode: int | None = None,
         diagnostic: str = "",
+        collision_kind: CollisionKind | None = None,
     ) -> None:
         self.operation = operation
         self.argv = tuple(argv)
         self.returncode = returncode
         self.diagnostic = _bounded(diagnostic)
+        self.collision_kind = collision_kind
         detail = self.diagnostic
         text = f"{message}: {detail}" if detail else message
         super().__init__(text)
@@ -160,10 +166,22 @@ class GitCliGateway:
         repo = _validated_path(repo_root, name="repository root")
         target = _validated_path(path, name="worktree path", require_exists=False)
         branch_name = _validated_branch(branch)
-        self._run(
+        completed = self._run(
             repo,
             ("worktree", "add", "-b", branch_name, str(target)),
             operation="add_worktree",
+            check=False,
+        )
+        if completed.returncode == 0:
+            return
+        diagnostic = _diagnostic(completed.stdout, completed.stderr)
+        raise GitAdapterError(
+            operation="add_worktree",
+            argv=self._argv(("worktree", "add", "-b", branch_name, str(target))),
+            message=f"git command failed with exit code {completed.returncode}",
+            returncode=completed.returncode,
+            diagnostic=diagnostic,
+            collision_kind=_classify_add_collision(diagnostic, branch=branch_name, path=target),
         )
 
     def remove_worktree(self, repo_root: Path, *, path: Path, force: bool) -> None:
@@ -201,6 +219,7 @@ class GitCliGateway:
                 text=True,
                 check=False,
                 shell=False,
+                env=_git_environment(),
             )
         except OSError as exc:
             raise GitAdapterError(
@@ -325,6 +344,53 @@ def _first_line(value: str | None) -> str | None:
 
 def _optional_text(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+def _classify_add_collision(
+    diagnostic: str,
+    *,
+    branch: str,
+    path: Path,
+) -> CollisionKind | None:
+    """Classify only Git's exact C-locale add-collision diagnostics.
+
+    The adapter forces ``LC_ALL=C`` for Git subprocesses, then matches the
+    complete operation-specific shape and the exact candidate branch/path.
+    Generic fragments such as ``already exists`` are intentionally ignored;
+    they can describe ref-lock, permission, or I/O failures.
+    """
+
+    lines = []
+    for raw_line in diagnostic.splitlines():
+        line = raw_line.strip()
+        if line.startswith("stderr:") or line.startswith("stdout:"):
+            line = line.split(":", 1)[1].strip()
+        if line.startswith("fatal:"):
+            line = line[len("fatal:") :].strip()
+        lines.append(line)
+
+    branch_collision = f"a branch named '{branch}' already exists"
+    path_collision = f"'{path}' already exists"
+    checked_out_collisions = (
+        f"'{branch}' is already used by worktree at ",
+        f"'{branch}' is already checked out at ",
+    )
+    for line in lines:
+        if line == branch_collision:
+            return "branch"
+        if line == path_collision:
+            return "path"
+        if any(line.startswith(prefix) and line.endswith("'") for prefix in checked_out_collisions):
+            return "checked_out"
+    return None
+
+
+def _git_environment() -> dict[str, str]:
+    """Make Git's diagnostics deterministic without dropping user settings."""
+
+    environment = dict(os.environ)
+    environment["LC_ALL"] = "C"
+    return environment
 
 
 def _diagnostic(stdout: str | None, stderr: str | None) -> str:

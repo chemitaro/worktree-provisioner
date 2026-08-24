@@ -7,17 +7,21 @@ repository is trusted are application/CLI policy decisions.
 
 from __future__ import annotations
 
+import os
+import re
+import selectors
 import shutil
 import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, Protocol, cast
+from typing import BinaryIO, Final, Protocol, cast
 
 from worktree_provisioner.application.contracts import BootstrapResult
 
 _MAKE_COMMAND: Final[str] = "make"
 _DIAGNOSTIC_LIMIT: Final[int] = 4096
+_STREAM_CHUNK_SIZE: Final[int] = 8192
 _MAKEFILE_NAMES: Final[tuple[str, ...]] = ("GNUmakefile", "makefile", "Makefile")
 _MISSING_INIT_TARGET_FRAGMENTS: Final[tuple[str, ...]] = (
     "no rule to make target 'init'",
@@ -63,7 +67,7 @@ class MakeAdapterError(RuntimeError):
         self.operation = operation
         self.argv = tuple(argv)
         self.returncode = returncode
-        self.diagnostic = _bounded(diagnostic)
+        self.diagnostic = _safe_bounded(diagnostic)
         detail = self.diagnostic
         suffix = f": {detail}" if detail else ""
         super().__init__(f"{message}{suffix}")
@@ -99,7 +103,7 @@ class MakeCliGateway:
                 status="detection_failed",
                 command=detection_argv,
                 exit_code=None,
-                detail=_bounded(str(exc)),
+                detail=_safe_bounded(str(exc)),
             )
         if not has_makefile:
             return _skipped()
@@ -121,7 +125,7 @@ class MakeCliGateway:
                 status="detection_failed",
                 command=detection_argv,
                 exit_code=None,
-                detail=_bounded(str(exc)),
+                detail=_safe_bounded(str(exc)),
             )
 
         detection_detail = _diagnostic(detected.stdout, detected.stderr)
@@ -148,7 +152,7 @@ class MakeCliGateway:
                 # non-zero exit status.  A process that cannot be started is
                 # represented as the conventional non-zero failure code.
                 exit_code=1,
-                detail=_bounded(str(exc)),
+                detail=_safe_bounded(str(exc)),
             )
 
         execution_detail = _diagnostic(executed.stdout, executed.stderr)
@@ -169,15 +173,20 @@ class MakeCliGateway:
         )
 
     def _run(self, argv: tuple[str, ...], cwd: Path) -> subprocess.CompletedProcess[str]:
-        runner = self.runner or cast(MakeRunner, subprocess.run)
-        return runner(
-            list(argv),
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            check=False,
-            shell=False,
-        )
+        if self.runner is not None:
+            # The injectable runner is a unit-test seam.  Normalize its result
+            # as well so fake adapters cannot bypass the public diagnostic
+            # redaction/boundary.
+            completed = self.runner(
+                list(argv),
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                check=False,
+                shell=False,
+            )
+            return _bounded_completed_process(completed)
+        return _run_bounded_process(argv, cwd)
 
 
 MakeGateway = MakeCliGateway
@@ -246,14 +255,15 @@ def _diagnostic(stdout: str | None, stderr: str | None) -> str:
         return ""
     if len(streams) == 1:
         label, value = streams[0]
-        return f"{label}: {_bounded(value, limit=_DIAGNOSTIC_LIMIT - len(label) - 2)}"
+        return f"{label}: {_safe_bounded(value, limit=_DIAGNOSTIC_LIMIT - len(label) - 2)}"
 
     prefix_budget = len("stderr: ") + len("stdout: ") + 1
     content_budget = max(0, _DIAGNOSTIC_LIMIT - prefix_budget)
     first_budget = content_budget // 2
     second_budget = content_budget - first_budget
     return (
-        f"stderr: {_bounded(streams[0][1], limit=first_budget)}\nstdout: {_bounded(streams[1][1], limit=second_budget)}"
+        f"stderr: {_safe_bounded(streams[0][1], limit=first_budget)}\n"
+        f"stdout: {_safe_bounded(streams[1][1], limit=second_budget)}"
     )
 
 
@@ -263,6 +273,95 @@ def _bounded(value: str, *, limit: int = _DIAGNOSTIC_LIMIT) -> str:
     if limit <= 1:
         return value[:limit]
     return f"{value[: limit - 1]}…"
+
+
+_SECRET_ASSIGNMENT = re.compile(
+    r"(?i)(?P<prefix>[A-Z0-9_.-]*(?:TOKEN|PASSWORD|SECRET|AUTHORIZATION|API[_-]?KEY)[A-Z0-9_.-]*\s*[:=]\s*)(?P<value>[^\s,;]+)"
+)
+_AUTHORIZATION_HEADER = re.compile(r"(?im)(?P<prefix>\bAuthorization\b\s*:\s*)(?:Bearer\s+)?[^\r\n]+")
+_BEARER_TOKEN = re.compile(r"(?i)\bBearer\s+[^\s,;]+")
+
+
+def _redact_secrets(value: str) -> str:
+    """Remove representative credential values before diagnostics escape."""
+
+    redacted = _SECRET_ASSIGNMENT.sub(r"\g<prefix>[REDACTED]", value)
+    redacted = _AUTHORIZATION_HEADER.sub(r"\g<prefix>[REDACTED]", redacted)
+    return _BEARER_TOKEN.sub("Bearer [REDACTED]", redacted)
+
+
+def _safe_bounded(value: str, *, limit: int = _DIAGNOSTIC_LIMIT) -> str:
+    """Redact first, then apply the externally visible hard character bound."""
+
+    return _bounded(_redact_secrets(value), limit=limit)
+
+
+def _bounded_completed_process(completed: subprocess.CompletedProcess[str]) -> subprocess.CompletedProcess[str]:
+    """Normalize an injected runner result to the same safe boundary."""
+
+    stdout = completed.stdout if isinstance(completed.stdout, str) else ""
+    stderr = completed.stderr if isinstance(completed.stderr, str) else ""
+    return subprocess.CompletedProcess(
+        completed.args,
+        completed.returncode,
+        stdout=_safe_bounded(stdout),
+        stderr=_safe_bounded(stderr),
+    )
+
+
+def _run_bounded_process(argv: tuple[str, ...], cwd: Path) -> subprocess.CompletedProcess[str]:
+    """Run a command while draining both pipes and retaining only a prefix.
+
+    ``subprocess.run(capture_output=True)`` must not be used here: it retains
+    an unbounded child output before this adapter can truncate it.  The
+    selector loop continues draining after each per-stream limit so a noisy
+    Makefile cannot deadlock the child, while only bounded bytes are stored.
+    """
+
+    process = subprocess.Popen(
+        list(argv),
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        shell=False,
+    )
+    assert process.stdout is not None and process.stderr is not None
+    stdout_fd = process.stdout.fileno()
+    stderr_fd = process.stderr.fileno()
+    streams: dict[int, bytearray] = {stdout_fd: bytearray(), stderr_fd: bytearray()}
+    selector = selectors.DefaultSelector()
+    selector.register(process.stdout, selectors.EVENT_READ)
+    selector.register(process.stderr, selectors.EVENT_READ)
+    try:
+        while selector.get_map():
+            for key, _ in selector.select():
+                stream = cast(BinaryIO, key.fileobj)
+                chunk = os.read(stream.fileno(), _STREAM_CHUNK_SIZE)
+                if not chunk:
+                    selector.unregister(stream)
+                    stream.close()
+                    continue
+                retained = streams[stream.fileno()]
+                if len(retained) < _DIAGNOSTIC_LIMIT:
+                    retained.extend(chunk[: _DIAGNOSTIC_LIMIT - len(retained)])
+        returncode = process.wait()
+    except BaseException:
+        process.kill()
+        process.wait()
+        raise
+    finally:
+        selector.close()
+        for pipe in (process.stdout, process.stderr):
+            assert pipe is not None
+            if not pipe.closed:
+                pipe.close()
+
+    return subprocess.CompletedProcess(
+        list(argv),
+        returncode,
+        stdout=bytes(streams[stdout_fd]).decode("utf-8", errors="replace"),
+        stderr=bytes(streams[stderr_fd]).decode("utf-8", errors="replace"),
+    )
 
 
 __all__ = [
