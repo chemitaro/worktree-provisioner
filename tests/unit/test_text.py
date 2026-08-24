@@ -128,3 +128,19 @@ def test_create_warning_is_rendered_for_stderr() -> None:
     _stdout, stderr = render_error(error)
 
     assert "worktree-provisioner: warning: code=collision_partial_artifact message=retained wt1" in stderr
+
+
+def test_text_restores_valid_utf8_surrogates_and_preserves_raw_bytes() -> None:
+    result = CreateResult(
+        id="日",
+        main_worktree_path=Path(b"/tmp/repo-\xe6\x97\xa5".decode("ascii", errors="surrogateescape")),
+        container_path=Path("/tmp/worktrees"),
+        worktree_path=Path(b"/tmp/worktrees/repo-\xe6\x97\xa5-\xff".decode("ascii", errors="surrogateescape")),
+        branch=b"feature-\xe6\x97\xa5".decode("ascii", errors="surrogateescape"),
+        bootstrap=BootstrapResult(requested=False, status="disabled", command=None, exit_code=None, detail=None),
+        artifacts=ArtifactState(True, True, True, True),
+    )
+
+    output = render_success(result)
+
+    assert r"path=/tmp/worktrees/repo-\u65e5-\udcff" in output

@@ -166,10 +166,14 @@ def test_dumps_escapes_surrogateescape_paths_as_reversible_utf8() -> None:
 
 def test_json_value_restores_valid_utf8_surrogateescape_paths() -> None:
     utf8_surrogate_path = b"/tmp/repo-\xe6\x97\xa5\xe6\x9c\xac".decode("ascii", errors="surrogateescape")
+    mixed_surrogate_path = b"/tmp/repo-\xe6\x97\xa5-\xff".decode("ascii", errors="surrogateescape")
     raw_surrogate_path = b"/tmp/repo-\xff".decode("ascii", errors="surrogateescape")
     utf8_surrogate_branch = b"feature-\xe6\x97\xa5".decode("ascii", errors="surrogateescape")
 
-    converted = cast(dict[str, Any], json_value({"path": utf8_surrogate_path, "raw": raw_surrogate_path}))
+    converted = cast(
+        dict[str, Any],
+        json_value({"path": utf8_surrogate_path, "mixed": mixed_surrogate_path, "raw": raw_surrogate_path}),
+    )
     record = cast(
         dict[str, Any],
         json_value(
@@ -182,6 +186,7 @@ def test_json_value_restores_valid_utf8_surrogateescape_paths() -> None:
     )
 
     assert converted["path"] == "/tmp/repo-日本"
+    assert converted["mixed"] == "/tmp/repo-日-\udcff"
     assert converted["raw"] == raw_surrogate_path
     assert record["branch"] == "feature-日"
 

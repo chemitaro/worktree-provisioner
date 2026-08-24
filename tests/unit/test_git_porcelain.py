@@ -103,6 +103,38 @@ def test_nul_parser_preserves_path_bytes_without_line_trimming() -> None:
     assert records == [GitWorktreeRecord(path=Path(raw_path), head="abc", branch="feature")]
 
 
+def test_nul_parser_restores_valid_utf8_fields_and_preserves_raw_bytes() -> None:
+    raw_path = b"/tmp/repo-\xe6\x97\xa5-\xff"
+    output = b"worktree " + raw_path + b"\0HEAD abc\0branch refs/heads/\xe6\xa9\x9f\xe8\x83\xbd\0\0"
+
+    records = parse_worktree_porcelain(output)
+
+    assert records == [
+        GitWorktreeRecord(
+            path=Path("/tmp/repo-日-\udcff"),
+            head="abc",
+            branch="機能",
+        )
+    ]
+
+
+def test_nul_parser_restores_mixed_utf8_and_raw_bytes_under_ascii_fsdecode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_path = b"/tmp/repo-\xe6\x97\xa5-\xff"
+    output = b"worktree " + raw_path + b"\0HEAD abc\0branch refs/heads/\xe6\xa9\x9f\xe8\x83\xbd\0\0"
+
+    monkeypatch.setattr(
+        "worktree_provisioner.infra.git_cli.os.fsdecode",
+        lambda value: value.decode("ascii", errors="surrogateescape"),
+    )
+
+    records = parse_worktree_porcelain(output)
+
+    assert records[0].path == Path(raw_path.decode("ascii", errors="surrogateescape"))
+    assert records[0].branch == "機能"
+
+
 @pytest.mark.parametrize("text", ["", "garbage\n", "HEAD abc\nbranch refs/heads/main\n"])
 def test_parser_returns_no_fabricated_record_for_empty_or_malformed_output(text: str) -> None:
     assert parse_worktree_porcelain(text) == []
@@ -205,6 +237,45 @@ def test_git_gateway_uses_exact_argv_and_preserves_paths(tmp_path: Path, monkeyp
     text_calls = [kwargs for argv, kwargs in calls if kwargs["text"] is True]
     assert all(kwargs["encoding"] == "utf-8" for kwargs in text_calls)
     assert all(kwargs["errors"] == "surrogateescape" for kwargs in text_calls)
+
+
+def test_git_gateway_encodes_unicode_argv_when_filesystem_locale_is_ascii(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    calls: list[list[str | bytes]] = []
+
+    def fake_fsencode(value: str) -> bytes:
+        if any(ord(character) > 127 for character in value):
+            raise UnicodeEncodeError("ascii", value, 0, len(value), "non-ASCII fixture")
+        return value.encode("ascii")
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("worktree_provisioner.infra.git_cli.shutil.which", lambda _: "/usr/bin/git")
+    monkeypatch.setattr("worktree_provisioner.infra.git_cli.os.fsencode", fake_fsencode)
+    monkeypatch.setattr("worktree_provisioner.infra.git_cli.subprocess.run", fake_run)
+
+    GitCliGateway().add_worktree(repo, path=tmp_path / "target", branch="feature-日本")
+
+    assert calls[0][4] == "feature-日本".encode()
+
+
+def test_current_branch_restores_valid_utf8_surrogates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    surrogate_branch = b"\xe6\xa9\x9f\xe8\x83\xbd".decode("ascii", errors="surrogateescape")
+
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 0, stdout=surrogate_branch + "\n", stderr="")
+
+    monkeypatch.setattr("worktree_provisioner.infra.git_cli.shutil.which", lambda _: "/usr/bin/git")
+    monkeypatch.setattr("worktree_provisioner.infra.git_cli.subprocess.run", fake_run)
+
+    assert GitCliGateway().current_branch_or_none(repo) == "機能"
 
 
 def test_resolve_checkout_root_preserves_trailing_space_and_checks_identity(

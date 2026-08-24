@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Final, Literal, overload
 
 from worktree_provisioner.application.contracts import CollisionKind, GitWorktreeRecord
+from worktree_provisioner.encoding import filesystem_argument, restore_utf8_surrogates
 
 _GIT_COMMAND: Final[str] = "git"
 _DIAGNOSTIC_LIMIT: Final[int] = 4096
@@ -452,11 +453,12 @@ class GitCliGateway:
             )
 
         completed: subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]
+        subprocess_argv = [filesystem_argument(argument) for argument in argv]
         try:
             if cwd_fd is None:
                 if text:
                     completed = subprocess.run(
-                        list(argv),
+                        subprocess_argv,
                         cwd=repo_root,
                         capture_output=True,
                         text=True,
@@ -468,7 +470,7 @@ class GitCliGateway:
                     )
                 else:
                     completed = subprocess.run(
-                        list(argv),
+                        subprocess_argv,
                         cwd=repo_root,
                         capture_output=True,
                         text=False,
@@ -479,7 +481,7 @@ class GitCliGateway:
             else:
                 if text:
                     completed = subprocess.run(
-                        list(argv),
+                        subprocess_argv,
                         cwd=repo_root,
                         capture_output=True,
                         text=True,
@@ -493,7 +495,7 @@ class GitCliGateway:
                     )
                 else:
                     completed = subprocess.run(
-                        list(argv),
+                        subprocess_argv,
                         cwd=repo_root,
                         capture_output=True,
                         text=False,
@@ -546,11 +548,12 @@ def _parse_worktree_porcelain_text(text: str) -> list[GitWorktreeRecord]:
         if not isinstance(path, str) or not path:
             return
         branch = block.get("branch")
-        normalized_branch = branch if isinstance(branch, str) and branch else None
+        normalized_branch = restore_utf8_surrogates(branch) if isinstance(branch, str) and branch else None
         if normalized_branch is not None and normalized_branch.startswith(_BRANCH_REF_PREFIX):
             normalized_branch = normalized_branch[len(_BRANCH_REF_PREFIX) :]
             if not normalized_branch:
                 normalized_branch = None
+        lock_reason = _optional_text(block.get("lock_reason"))
         records.append(
             GitWorktreeRecord(
                 path=Path(path),
@@ -559,7 +562,7 @@ def _parse_worktree_porcelain_text(text: str) -> list[GitWorktreeRecord]:
                 detached=bool(block.get("detached", False)),
                 bare=bool(block.get("bare", False)),
                 locked=bool(block.get("locked", False)),
-                lock_reason=_optional_text(block.get("lock_reason")),
+                lock_reason=restore_utf8_surrogates(lock_reason) if lock_reason is not None else None,
             )
         )
 
@@ -604,7 +607,7 @@ def _parse_worktree_porcelain_z(data: bytes) -> list[GitWorktreeRecord]:
         if raw_path is None or not raw_path:
             return
         branch = block.get("branch")
-        normalized_branch = decode(branch) if branch else None
+        normalized_branch = restore_utf8_surrogates(decode(branch)) if branch else None
         if normalized_branch is not None and normalized_branch.startswith(_BRANCH_REF_PREFIX):
             normalized_branch = normalized_branch[len(_BRANCH_REF_PREFIX) :] or None
         lock_reason = block.get("lock_reason")
@@ -616,7 +619,7 @@ def _parse_worktree_porcelain_z(data: bytes) -> list[GitWorktreeRecord]:
                 detached="detached" in block,
                 bare="bare" in block,
                 locked="locked" in block,
-                lock_reason=decode(lock_reason) if lock_reason else None,
+                lock_reason=restore_utf8_surrogates(decode(lock_reason)) if lock_reason else None,
             )
         )
 
@@ -698,7 +701,7 @@ def _validated_relative_name(name: str) -> str:
 def _diagnostic_text(value: str | bytes | None) -> str | None:
     if value is None:
         return None
-    return value if isinstance(value, str) else os.fsdecode(value)
+    return restore_utf8_surrogates(value if isinstance(value, str) else os.fsdecode(value))
 
 
 def _remove_stdout_delimiter(value: str | bytes | None) -> str | bytes | None:
@@ -717,7 +720,7 @@ def _remove_stdout_delimiter(value: str | bytes | None) -> str | bytes | None:
 def _first_line(value: str | None) -> str | None:
     if not value:
         return None
-    line = value.splitlines()[0].strip()
+    line = restore_utf8_surrogates(value.splitlines()[0].strip())
     return line or None
 
 
@@ -749,7 +752,7 @@ def _classify_add_collision(
         lines.append(line)
 
     branch_collision = f"a branch named '{branch}' already exists"
-    path_collision = f"'{path}' already exists"
+    path_collision = f"'{restore_utf8_surrogates(str(path))}' already exists"
     checked_out_collisions = (
         f"'{branch}' is already used by worktree at ",
         f"'{branch}' is already checked out at ",

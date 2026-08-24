@@ -13,6 +13,7 @@ from worktree_provisioner.application.contracts import (
     ResultWarning,
     ShowResult,
 )
+from worktree_provisioner.encoding import restore_utf8_surrogates
 
 
 def render_success(result: CreateResult | ListResult | ShowResult | RemoveResult) -> str:
@@ -109,7 +110,7 @@ def _absolute_path(path: Path) -> str:
 
 
 def _safe_text(value: object) -> str:
-    rendered = str(value).replace("\r", "\\r").replace("\n", "\\n")
+    rendered = restore_utf8_surrogates(str(value)).replace("\r", "\\r").replace("\n", "\\n")
     return rendered.encode("ascii", errors="backslashreplace").decode("ascii")
 
 
