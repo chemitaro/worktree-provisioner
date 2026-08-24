@@ -15,7 +15,7 @@ import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
+from typing import Final, Literal, overload
 
 from worktree_provisioner.application.contracts import CollisionKind, GitWorktreeRecord
 
@@ -89,17 +89,40 @@ class GitCliGateway:
             candidate,
             ("rev-parse", "--show-toplevel"),
             operation="resolve_checkout_root",
+            text=False,
         )
-        raw_root = _first_line(completed.stdout)
-        if raw_root is None:
+        raw_root = _remove_stdout_delimiter(completed.stdout)
+        if not raw_root:
             raise GitAdapterError(
                 operation="resolve_checkout_root",
                 argv=self._argv(("rev-parse", "--show-toplevel")),
                 message="git returned an empty checkout root",
                 returncode=completed.returncode,
-                diagnostic=_diagnostic(completed.stdout, completed.stderr),
+                diagnostic=_diagnostic(_diagnostic_text(completed.stdout), _diagnostic_text(completed.stderr)),
             )
-        return Path(raw_root)
+        root = Path(os.fsdecode(raw_root))
+        try:
+            candidate_identity = candidate.resolve(strict=True)
+            root_identity = root.resolve(strict=True)
+        except OSError as exc:
+            raise GitAdapterError(
+                operation="resolve_checkout_root",
+                argv=self._argv(("rev-parse", "--show-toplevel")),
+                message="failed to verify the Git checkout root",
+                returncode=completed.returncode,
+                diagnostic=str(exc),
+            ) from exc
+        try:
+            candidate_identity.relative_to(root_identity)
+        except ValueError:
+            raise GitAdapterError(
+                operation="resolve_checkout_root",
+                argv=self._argv(("rev-parse", "--show-toplevel")),
+                message="Git returned a checkout root outside the requested checkout",
+                returncode=completed.returncode,
+                diagnostic=f"requested={candidate_identity} returned={root_identity}",
+            ) from None
+        return root
 
     def current_branch_or_none(self, repo_root: Path) -> str | None:
         """Return the named branch, or ``None`` for detached ``HEAD``."""
@@ -150,13 +173,14 @@ class GitCliGateway:
         )
 
     def worktree_list(self, repo_root: Path) -> list[GitWorktreeRecord]:
-        """Return Git's porcelain worktree inventory."""
+        """Return Git's NUL-delimited porcelain worktree inventory."""
 
         repo = _validated_path(repo_root, name="repository root")
         completed = self._run(
             repo,
-            ("worktree", "list", "--porcelain"),
+            ("worktree", "list", "--porcelain", "-z"),
             operation="worktree_list",
+            text=False,
         )
         return parse_worktree_porcelain(completed.stdout)
 
@@ -195,6 +219,7 @@ class GitCliGateway:
     def _argv(self, args: Sequence[str]) -> tuple[str, ...]:
         return (self.git_executable, *args)
 
+    @overload
     def _run(
         self,
         repo_root: Path,
@@ -202,7 +227,29 @@ class GitCliGateway:
         *,
         operation: str,
         check: bool = True,
-    ) -> subprocess.CompletedProcess[str]:
+        text: Literal[True] = True,
+    ) -> subprocess.CompletedProcess[str]: ...
+
+    @overload
+    def _run(
+        self,
+        repo_root: Path,
+        args: Sequence[str],
+        *,
+        operation: str,
+        check: bool = True,
+        text: Literal[False],
+    ) -> subprocess.CompletedProcess[bytes]: ...
+
+    def _run(
+        self,
+        repo_root: Path,
+        args: Sequence[str],
+        *,
+        operation: str,
+        check: bool = True,
+        text: bool = True,
+    ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
         argv = self._argv(args)
         if shutil.which(self.git_executable) is None:
             raise GitAdapterError(
@@ -216,7 +263,7 @@ class GitCliGateway:
                 list(argv),
                 cwd=repo_root,
                 capture_output=True,
-                text=True,
+                text=text,
                 check=False,
                 shell=False,
                 env=_git_environment(),
@@ -235,19 +282,26 @@ class GitCliGateway:
                 argv=argv,
                 message=f"git command failed with exit code {completed.returncode}",
                 returncode=completed.returncode,
-                diagnostic=_diagnostic(completed.stdout, completed.stderr),
+                diagnostic=_diagnostic(_diagnostic_text(completed.stdout), _diagnostic_text(completed.stderr)),
             )
         return completed
 
 
-def parse_worktree_porcelain(text: str) -> list[GitWorktreeRecord]:
-    """Parse ``git worktree list --porcelain`` without relying on a final blank.
+def parse_worktree_porcelain(output: str | bytes) -> list[GitWorktreeRecord]:
+    """Parse text or NUL-delimited Git worktree porcelain output.
 
-    Git emits one block per worktree.  Unknown metadata lines are ignored so
-    newer Git fields do not break inventory parsing; blocks without a valid
-    ``worktree`` line are not returned.  This also makes an empty or malformed
-    response safely produce an empty inventory instead of a fabricated record.
+    The adapter uses Git's ``--porcelain -z`` form so path bytes are never
+    confused with line or record delimiters.  The text form remains accepted
+    for callers and historical fixtures that use the older newline protocol.
     """
+
+    if isinstance(output, bytes):
+        return _parse_worktree_porcelain_z(output)
+    return _parse_worktree_porcelain_text(output)
+
+
+def _parse_worktree_porcelain_text(text: str) -> list[GitWorktreeRecord]:
+    """Parse the legacy line-delimited form without fabricating records."""
 
     records: list[GitWorktreeRecord] = []
     block: dict[str, object] = {}
@@ -301,6 +355,61 @@ def parse_worktree_porcelain(text: str) -> list[GitWorktreeRecord]:
     return records
 
 
+def _parse_worktree_porcelain_z(data: bytes) -> list[GitWorktreeRecord]:
+    """Parse Git's NUL-delimited porcelain fields without trimming values."""
+
+    records: list[GitWorktreeRecord] = []
+    block: dict[str, bytes] = {}
+
+    def decode(value: bytes) -> str:
+        return os.fsdecode(value)
+
+    def flush() -> None:
+        raw_path = block.get("path")
+        if raw_path is None or not raw_path:
+            return
+        branch = block.get("branch")
+        normalized_branch = decode(branch) if branch else None
+        if normalized_branch is not None and normalized_branch.startswith(_BRANCH_REF_PREFIX):
+            normalized_branch = normalized_branch[len(_BRANCH_REF_PREFIX) :] or None
+        lock_reason = block.get("lock_reason")
+        records.append(
+            GitWorktreeRecord(
+                path=Path(decode(raw_path)),
+                head=decode(block["head"]) if block.get("head") else None,
+                branch=normalized_branch,
+                detached="detached" in block,
+                bare="bare" in block,
+                locked="locked" in block,
+                lock_reason=decode(lock_reason) if lock_reason else None,
+            )
+        )
+
+    for field in data.split(b"\0"):
+        if field == b"":
+            flush()
+            block = {}
+            continue
+        if field.startswith(b"worktree "):
+            flush()
+            block = {"path": field[len(b"worktree ") :]}
+        elif field.startswith(b"HEAD "):
+            block["head"] = field[len(b"HEAD ") :]
+        elif field.startswith(b"branch "):
+            block["branch"] = field[len(b"branch ") :]
+        elif field == b"detached":
+            block["detached"] = field
+        elif field == b"bare":
+            block["bare"] = field
+        elif field == b"locked" or field.startswith(b"locked "):
+            block["locked"] = field
+            block["lock_reason"] = field[len(b"locked") + 1 :] if field.startswith(b"locked ") else b""
+        # ``prunable`` and future Git metadata are deliberately ignored.
+
+    flush()
+    return records
+
+
 def _validated_path(path: Path, *, name: str, require_exists: bool = True) -> Path:
     """Validate a subprocess path without changing its spelling."""
 
@@ -333,6 +442,25 @@ def _validated_branch(branch: str) -> str:
             message="branch must be a non-empty string without NUL bytes",
         )
     return branch
+
+
+def _diagnostic_text(value: str | bytes | None) -> str | None:
+    if value is None:
+        return None
+    return value if isinstance(value, str) else os.fsdecode(value)
+
+
+def _remove_stdout_delimiter(value: str | bytes | None) -> str | bytes | None:
+    """Remove exactly Git's final newline delimiter, never path whitespace."""
+
+    if not value:
+        return None
+    trimmed: str | bytes | None
+    if isinstance(value, str):
+        trimmed = value[:-1] if value.endswith("\n") else None
+    else:
+        trimmed = value[:-1] if value.endswith(b"\n") else None
+    return trimmed if trimmed else None
 
 
 def _first_line(value: str | None) -> str | None:

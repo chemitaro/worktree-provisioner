@@ -276,6 +276,28 @@ class CheckedOutColliderRaceGit(FakeGitGateway):
         self.records.append(FakeGitRecord(path=path, branch=branch))
 
 
+class BranchColliderWithRecordRaceGit(FakeGitGateway):
+    attempts: int = 0
+
+    def add_worktree(self, repo_root: Path, *, path: Path, branch: str) -> None:
+        self._record("add_worktree", repo_root, path=path, branch=branch)
+        self.attempts += 1
+        if self.attempts == 1:
+            # A concurrent actor checks out the same branch elsewhere.  The
+            # branch record is the collider, not an artifact at this attempt's
+            # candidate path.
+            self.branches.add(branch)
+            self.records.append(FakeGitRecord(path=repo_root.parent / "claimed", branch=branch))
+            raise GitAdapterError(
+                operation="add_worktree",
+                argv=("git", "worktree", "add"),
+                message="branch collision with checked-out collider",
+                collision_kind="branch",
+            )
+        self.branches.add(branch)
+        self.records.append(FakeGitRecord(path=path, branch=branch))
+
+
 @pytest.mark.parametrize("gateway", ["branch", "path", "checked_out"])
 def test_typed_collision_retries_when_refusal_collider_is_observed(tmp_path: Path, gateway: str) -> None:
     repo = tmp_path / "checkout"
@@ -291,6 +313,23 @@ def test_typed_collision_retries_when_refusal_collider_is_observed(tmp_path: Pat
         git = path_git
     else:
         git = CheckedOutColliderRaceGit(checkout_root=repo, records=[FakeGitRecord(path=repo)], branches={"main"})
+
+    result = WorktreeService(_ports(git, FakeBootstrapGateway(), filesystem)).create(_request(repo, tmp_path / "root"))
+
+    assert result.id == "wt2"
+    assert result.branch == "main-wt2"
+    assert sum(1 for call in git.calls if call[0] == "add_worktree") == 2
+
+
+def test_branch_collision_with_same_branch_record_at_other_path_retries(tmp_path: Path) -> None:
+    repo = tmp_path / "checkout"
+    repo.mkdir()
+    git = BranchColliderWithRecordRaceGit(
+        checkout_root=repo,
+        records=[FakeGitRecord(path=repo)],
+        branches={"main"},
+    )
+    filesystem = FakeFilesystemGateway()
 
     result = WorktreeService(_ports(git, FakeBootstrapGateway(), filesystem)).create(_request(repo, tmp_path / "root"))
 

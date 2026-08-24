@@ -279,6 +279,34 @@ def test_real_make_missing_init_prerequisite_is_not_skipped(tmp_path: Path) -> N
     assert result.exit_code != 0
 
 
+def test_real_make_init_rule_selected_by_makecmdgoals_is_not_skipped(tmp_path: Path) -> None:
+    if shutil.which("make") is None:
+        pytest.skip("make is unavailable")
+    (tmp_path / "Makefile").write_text(
+        "ifneq (,$(filter init,$(MAKECMDGOALS)))\ninit: missing-prerequisite\n\t@echo init\nendif\n",
+        encoding="utf-8",
+    )
+
+    result = MakeCliGateway().run_make_init_if_available(tmp_path)
+
+    assert result.status == "detection_failed"
+    assert result.exit_code != 0
+
+
+def test_real_make_init_conditional_include_failure_is_not_skipped(tmp_path: Path) -> None:
+    if shutil.which("make") is None:
+        pytest.skip("make is unavailable")
+    (tmp_path / "Makefile").write_text(
+        "ifeq ($(MAKECMDGOALS),init)\ninclude missing.mk\nendif\n",
+        encoding="utf-8",
+    )
+
+    result = MakeCliGateway().run_make_init_if_available(tmp_path)
+
+    assert result.status == "detection_failed"
+    assert result.exit_code != 0
+
+
 def test_real_make_unrelated_default_failure_does_not_hide_init(tmp_path: Path) -> None:
     if shutil.which("make") is None:
         pytest.skip("make is unavailable")
@@ -305,6 +333,77 @@ def test_real_make_repository_default_rule_remains_available_for_init(tmp_path: 
 
     assert result.status == "succeeded"
     assert (tmp_path / "generated").is_file()
+
+
+def test_real_make_failing_repository_default_is_detection_failure(tmp_path: Path) -> None:
+    if shutil.which("make") is None:
+        pytest.skip("make is unavailable")
+    (tmp_path / "Makefile").write_text(
+        ".DEFAULT:\n\t$(error repository-default-failure)\n",
+        encoding="utf-8",
+    )
+
+    result = MakeCliGateway().run_make_init_if_available(tmp_path)
+
+    assert result.status == "detection_failed"
+    assert result.exit_code != 0
+
+
+def test_real_make_structural_probe_preserves_custom_recipe_prefix(tmp_path: Path) -> None:
+    if shutil.which("make") is None:
+        pytest.skip("make is unavailable")
+    makefile = ".RECIPEPREFIX := >\ninit:\n>@touch initialized\n"
+    (tmp_path / "Makefile").write_text(makefile, encoding="utf-8")
+
+    support = subprocess.run(
+        ["make", "-n", "-f", "-", "init"],
+        input=makefile,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    result = MakeCliGateway().run_make_init_if_available(tmp_path)
+
+    if support.returncode != 0 and "missing separator" in support.stderr:
+        # macOS GNU Make 3.81 predates .RECIPEPREFIX.  The important
+        # invariant on unsupported versions is that parse failure is not
+        # mistaken for a missing init target.
+        assert result.status == "detection_failed"
+        return
+    assert result.status == "succeeded"
+    assert (tmp_path / "initialized").is_file()
+
+
+def test_real_make_structural_probe_preserves_symlinked_makefile_identity(tmp_path: Path) -> None:
+    if shutil.which("make") is None:
+        pytest.skip("make is unavailable")
+    real_makefile = tmp_path / "real.mk"
+    real_makefile.write_text("init:\n\t@touch initialized\n", encoding="utf-8")
+    (tmp_path / "Makefile").symlink_to(real_makefile.name)
+
+    result = MakeCliGateway().run_make_init_if_available(tmp_path)
+
+    assert result.status == "succeeded"
+    assert (tmp_path / "initialized").is_file()
+
+
+def test_real_make_structural_probe_preserves_relative_makefile_list_include(tmp_path: Path) -> None:
+    if shutil.which("make") is None:
+        pytest.skip("make is unavailable")
+    config = tmp_path / "config"
+    config.mkdir()
+    (tmp_path / "Makefile").write_text("include config/targets.mk\n", encoding="utf-8")
+    (config / "targets.mk").write_text(
+        "include $(dir $(lastword $(MAKEFILE_LIST)))commands.mk\n",
+        encoding="utf-8",
+    )
+    (config / "commands.mk").write_text("init:\n\t@touch initialized\n", encoding="utf-8")
+
+    result = MakeCliGateway().run_make_init_if_available(tmp_path)
+
+    assert result.status == "succeeded"
+    assert (tmp_path / "initialized").is_file()
 
 
 def test_make_runner_start_failure_is_reported_as_failed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

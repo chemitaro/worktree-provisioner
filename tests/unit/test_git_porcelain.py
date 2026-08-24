@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -91,6 +93,15 @@ def test_parser_does_not_depend_on_final_blank_line() -> None:
     assert records == [GitWorktreeRecord(path=Path("/repo"), head="abc", branch="main")]
 
 
+def test_nul_parser_preserves_path_bytes_without_line_trimming() -> None:
+    raw_path = '/tmp/ leading\ttrailing "quote" \\\\ 日本\n'
+    output = f"worktree {raw_path}".encode() + b"\0" + b"HEAD abc\0branch refs/heads/feature\0\0"
+
+    records = parse_worktree_porcelain(output)
+
+    assert records == [GitWorktreeRecord(path=Path(raw_path), head="abc", branch="feature")]
+
+
 @pytest.mark.parametrize("text", ["", "garbage\n", "HEAD abc\nbranch refs/heads/main\n"])
 def test_parser_returns_no_fabricated_record_for_empty_or_malformed_output(text: str) -> None:
     assert parse_worktree_porcelain(text) == []
@@ -112,9 +123,9 @@ def test_git_gateway_uses_exact_argv_and_preserves_paths(tmp_path: Path, monkeyp
         calls.append((argv, kwargs))
         command = tuple(argv[1:])
         stdout = {
-            ("rev-parse", "--show-toplevel"): "/repo\n",
+            ("rev-parse", "--show-toplevel"): f"{repo.resolve()}\n",
             ("rev-parse", "--abbrev-ref", "HEAD"): "main\n",
-            ("worktree", "list", "--porcelain"): "worktree /repo\nHEAD abc\nbranch refs/heads/main\n",
+            ("worktree", "list", "--porcelain", "-z"): "worktree /repo\nHEAD abc\nbranch refs/heads/main\n",
         }.get(command, "")
         return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
 
@@ -122,7 +133,7 @@ def test_git_gateway_uses_exact_argv_and_preserves_paths(tmp_path: Path, monkeyp
     monkeypatch.setattr("worktree_provisioner.infra.git_cli.subprocess.run", fake_run)
     gateway = GitCliGateway()
 
-    assert gateway.resolve_checkout_root(repo) == Path("/repo")
+    assert gateway.resolve_checkout_root(repo) == repo.resolve()
     assert gateway.current_branch_or_none(repo) == "main"
     assert gateway.local_branch_exists(repo, "main") is True
     assert gateway.check_branch_ref(repo, "main") is True
@@ -136,13 +147,116 @@ def test_git_gateway_uses_exact_argv_and_preserves_paths(tmp_path: Path, monkeyp
         ["git", "rev-parse", "--abbrev-ref", "HEAD"],
         ["git", "show-ref", "--verify", "--quiet", "refs/heads/main"],
         ["git", "check-ref-format", "--branch", "main"],
-        ["git", "worktree", "list", "--porcelain"],
+        ["git", "worktree", "list", "--porcelain", "-z"],
         ["git", "worktree", "add", "-b", "feature", str(add_path)],
         ["git", "worktree", "remove", str(remove_path)],
         ["git", "worktree", "remove", "--force", str(remove_path)],
     ]
     assert all(kwargs["shell"] is False for _, kwargs in calls)
     assert all(kwargs["cwd"] == repo for _, kwargs in calls)
+
+
+def test_resolve_checkout_root_preserves_trailing_space_and_checks_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo "
+    repo.mkdir()
+
+    def fake_run(argv, **kwargs):
+        assert kwargs["text"] is False
+        return subprocess.CompletedProcess(argv, 0, stdout=os.fsencode(repo) + b"\n", stderr=b"")
+
+    monkeypatch.setattr("worktree_provisioner.infra.git_cli.shutil.which", lambda _: "/usr/bin/git")
+    monkeypatch.setattr("worktree_provisioner.infra.git_cli.subprocess.run", fake_run)
+
+    assert GitCliGateway().resolve_checkout_root(repo) == repo.resolve()
+
+
+def test_resolve_checkout_root_rejects_wrong_repository_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    wrong = tmp_path / "wrong"
+    repo.mkdir()
+    wrong.mkdir()
+
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 0, stdout=os.fsencode(wrong) + b"\n", stderr=b"")
+
+    monkeypatch.setattr("worktree_provisioner.infra.git_cli.shutil.which", lambda _: "/usr/bin/git")
+    monkeypatch.setattr("worktree_provisioner.infra.git_cli.subprocess.run", fake_run)
+
+    with pytest.raises(GitAdapterError, match="outside the requested checkout"):
+        GitCliGateway().resolve_checkout_root(repo)
+
+
+def test_resolve_checkout_root_rejects_empty_delimited_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 0, stdout=b"\n", stderr=b"")
+
+    monkeypatch.setattr("worktree_provisioner.infra.git_cli.shutil.which", lambda _: "/usr/bin/git")
+    monkeypatch.setattr("worktree_provisioner.infra.git_cli.subprocess.run", fake_run)
+
+    with pytest.raises(GitAdapterError, match="empty checkout root"):
+        GitCliGateway().resolve_checkout_root(repo)
+
+
+def test_resolve_checkout_root_accepts_repository_subdirectory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = tmp_path / "repo"
+    subdirectory = repo / "nested"
+    subdirectory.mkdir(parents=True)
+
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 0, stdout=os.fsencode(repo) + b"\n", stderr=b"")
+
+    monkeypatch.setattr("worktree_provisioner.infra.git_cli.shutil.which", lambda _: "/usr/bin/git")
+    monkeypatch.setattr("worktree_provisioner.infra.git_cli.subprocess.run", fake_run)
+
+    assert GitCliGateway().resolve_checkout_root(subdirectory) == repo.resolve()
+
+
+def test_real_git_trailing_space_repository_mutation_boundary(tmp_path: Path) -> None:
+    git = shutil.which("git")
+    if git is None:
+        pytest.skip("git is unavailable")
+    (tmp_path / "repo").mkdir()
+    repo = tmp_path / "repo "
+    linked = tmp_path / "work tree"
+    repo.mkdir()
+
+    def run_git(*args: str) -> None:
+        subprocess.run(
+            [git, *args],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+    run_git("init", "--quiet")
+    run_git("config", "user.email", "test@example.invalid")
+    run_git("config", "user.name", "Worktree Provisioner Test")
+    (repo / "README").write_text("fixture\n", encoding="utf-8")
+    run_git("add", "README")
+    run_git("commit", "--quiet", "-m", "fixture")
+
+    gateway = GitCliGateway()
+    assert gateway.resolve_checkout_root(repo) == repo.resolve()
+    nested = repo / "nested"
+    nested.mkdir()
+    assert gateway.resolve_checkout_root(nested) == repo.resolve()
+    assert any(record.path == repo.resolve() for record in gateway.worktree_list(repo))
+
+    gateway.add_worktree(repo, path=linked, branch="fixture-linked")
+    assert gateway.resolve_checkout_root(linked) == linked.resolve()
+    assert any(record.path == linked.resolve() for record in gateway.worktree_list(repo))
+
+    gateway.remove_worktree(repo, path=linked, force=False)
+    assert not linked.exists()
+    assert all(record.path != linked.resolve() for record in gateway.worktree_list(repo))
 
 
 @pytest.mark.parametrize(
@@ -222,7 +336,7 @@ def test_missing_git_is_typed_error(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 
     assert caught.value.returncode is None
     assert caught.value.operation == "worktree_list"
-    assert caught.value.argv == ("git", "worktree", "list", "--porcelain")
+    assert caught.value.argv == ("git", "worktree", "list", "--porcelain", "-z")
 
 
 def test_oserror_and_command_output_are_typed_and_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

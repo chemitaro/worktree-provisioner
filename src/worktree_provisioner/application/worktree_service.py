@@ -1254,18 +1254,16 @@ def _collision_retry_is_safe(
 
     if kind == "branch":
         # A local branch may have appeared in the race, but a worktree record
-        # for it means the refusal was actually a checked-out collision or a
-        # partial add and must be surfaced.
+        # for it at another path is the expected checked-out collider.  The
+        # candidate path and candidate record are the attempt-mutation gate.
         return (
             artifacts.worktree_path_exists is False
             and artifacts.branch_exists is True
             and artifacts.worktree_record_exists is False
-            and not matching_branch_record
         ) or (
             artifacts.worktree_path_exists is False
             and artifacts.branch_exists is False
             and artifacts.worktree_record_exists is False
-            and not matching_branch_record
         )
 
     if kind == "path":

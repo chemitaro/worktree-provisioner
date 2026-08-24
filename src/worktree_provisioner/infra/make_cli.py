@@ -329,70 +329,133 @@ def _bounded_completed_process(completed: subprocess.CompletedProcess[str]) -> s
 def _run_structural_probe(
     make_executable: str, cwd: Path, makefile: Path
 ) -> tuple[subprocess.CompletedProcess[str], bool]:
-    """Probe ``init`` through a controlled prerequisite, not human output.
+    """Prove an absent ``init`` from make's own parsed rule database.
 
-    A temporary overlay adds a unique probe target whose prerequisite is
-    ``init``.  The repository makefile and overlay are passed as separate
-    ``-f`` arguments, so paths are never re-parsed as make include syntax.
-    A direct explicit-target probe is accepted when it succeeds, preserving
-    repository-defined implicit and ``.DEFAULT`` rules; the overlay is used
-    only to distinguish an absent ``init`` after that probe fails.
-    ``.DEFAULT`` supplies a second unique marker only when that prerequisite
-    is absent.  ``-n`` preserves the no-recipe-execution boundary, while the
-    bounded process reader drains all output without retaining it.
+    The direct command remains the authority for success and failure.  Only
+    after a direct failure do we ask make for its C-locale database while
+    adding an independent phony goal.  The overlay never replaces
+    ``.DEFAULT`` or any repository rule, and the repository makefile is passed
+    by its original basename so relative includes and ``MAKEFILE_LIST`` keep
+    their normal identity.  A complete database with neither an explicit
+    ``init`` nor a repository ``.DEFAULT`` proves absence; all other failures
+    stay detection failures.
     """
 
-    repository_makefile = makefile.resolve(strict=False)
-    direct = _run_bounded_process(
-        (make_executable, "-n", "-f", str(repository_makefile), "init"),
-        cwd,
-    )
+    direct = _run_bounded_process((make_executable, "-n", "init"), cwd)
     if direct.returncode == 0:
         return direct, True
 
     token = secrets.token_hex(16)
-    sentinel = f"__worktree_provisioner_probe_{token}"
-    present_marker = f"__worktree_provisioner_present_{token}"
-    missing_marker = f"__worktree_provisioner_missing_{token}"
-    overlay = (
-        ".DEFAULT:\n"
-        f"\t@printf '%s\\n' '{missing_marker}:$@'\n"
-        f".PHONY: {sentinel}\n"
-        f"{sentinel}: init\n"
-        f"\t@printf '%s\\n' '{present_marker}'\n"
-    )
-    states = {"present": False, "missing_init": False, "missing_other": False}
+    probe_target = f"__worktree_provisioner_database_{token}"
+    overlay = f".PHONY: {probe_target}\n{probe_target}: ;\n"
 
-    def marker_matcher(line: str) -> bool:
-        if present_marker in line:
-            states["present"] = True
-        if f"{missing_marker}:init" in line:
-            states["missing_init"] = True
-        elif missing_marker in line:
-            states["missing_other"] = True
-        return states["present"] or states["missing_init"] or states["missing_other"]
+    def new_states() -> dict[str, bool]:
+        return {
+            "database_started": False,
+            "files_section": False,
+            "database_finished": False,
+            "not_target": False,
+            "probe_target_seen": False,
+            "explicit_init": False,
+            "explicit_default": False,
+        }
+
+    def database_matcher(states: dict[str, bool], expected_target: str) -> Callable[[str], bool]:
+        def match(line: str) -> bool:
+            if line.startswith("# Make data base, printed on "):
+                states["database_started"] = True
+                return False
+            if not states["database_started"]:
+                return False
+            if line == "# Files":
+                states["files_section"] = True
+                states["not_target"] = False
+                return False
+            if line.startswith("# Finished Make data base"):
+                states["database_finished"] = True
+                states["files_section"] = False
+                states["not_target"] = False
+                return False
+            if not states["files_section"]:
+                return False
+            if line == "# Not a target:":
+                states["not_target"] = True
+                return False
+            if line.startswith(f"{expected_target}:"):
+                states["probe_target_seen"] = states["probe_target_seen"] or not states["not_target"]
+                states["not_target"] = False
+                return False
+            if line.startswith("init:"):
+                states["explicit_init"] = states["explicit_init"] or not states["not_target"]
+                states["not_target"] = False
+                return False
+            if line == ".DEFAULT:":
+                states["explicit_default"] = states["explicit_default"] or not states["not_target"]
+                states["not_target"] = False
+                return False
+            if line.strip():
+                states["not_target"] = False
+            return False
+
+        return match
+
+    def database_is_complete(states: dict[str, bool]) -> bool:
+        return (
+            states["database_started"]
+            and not states["files_section"]
+            and states["database_finished"]
+            and states["probe_target_seen"]
+        )
+
+    def run_database_probe(overlay_path: Path, states: dict[str, bool]) -> subprocess.CompletedProcess[str]:
+        completed, _ = _run_bounded_process_with_matcher(
+            (
+                make_executable,
+                "-np",
+                "-k",
+                "-f",
+                makefile.name,
+                "-f",
+                str(overlay_path),
+                # The harmless probe goal avoids resolving ``init`` while
+                # this assignment preserves Makefiles that condition rules
+                # on the direct command's MAKECMDGOALS value.
+                "MAKECMDGOALS=init",
+                probe_target,
+            ),
+            cwd,
+            database_matcher(states, probe_target),
+            env=_make_probe_environment(),
+        )
+        return completed
 
     with tempfile.TemporaryDirectory(prefix="worktree-provisioner-make-") as directory:
         overlay_path = Path(directory) / "Makefile"
         overlay_path.write_text(overlay, encoding="utf-8")
-        completed, _ = _run_bounded_process_with_matcher(
-            (make_executable, "-n", "-f", str(repository_makefile), "-f", str(overlay_path), sentinel),
-            cwd,
-            marker_matcher,
-        )
-    marker_observed = states["present"] or states["missing_init"] or states["missing_other"]
-    if completed.returncode == 0 and (states["missing_other"] or not marker_observed):
-        completed = subprocess.CompletedProcess(
+        states = new_states()
+        completed = run_database_probe(overlay_path, states)
+    if completed.returncode == 0 and database_is_complete(states):
+        if states["explicit_init"] or states["explicit_default"]:
+            return direct, False
+        return subprocess.CompletedProcess(
             completed.args,
-            1,
-            stdout=completed.stdout,
-            stderr=completed.stderr,
-        )
-    return completed, states["present"] and not states["missing_init"] and not states["missing_other"]
+            0,
+            stdout="",
+            stderr="",
+        ), False
+    return direct, False
 
 
-def _run_bounded_process(argv: tuple[str, ...], cwd: Path) -> subprocess.CompletedProcess[str]:
-    completed, _ = _run_bounded_process_with_matcher(argv, cwd, None)
+def _make_probe_environment() -> dict[str, str]:
+    environment = dict(os.environ)
+    environment["LC_ALL"] = "C"
+    return environment
+
+
+def _run_bounded_process(
+    argv: tuple[str, ...], cwd: Path, *, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    completed, _ = _run_bounded_process_with_matcher(argv, cwd, None, env=env)
     return completed
 
 
@@ -400,6 +463,8 @@ def _run_bounded_process_with_matcher(
     argv: tuple[str, ...],
     cwd: Path,
     matcher: Callable[[str], bool] | None,
+    *,
+    env: dict[str, str] | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], bool]:
     """Run a command while draining both pipes and retaining only a prefix.
 
@@ -415,6 +480,7 @@ def _run_bounded_process_with_matcher(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         shell=False,
+        env=env,
     )
     assert process.stdout is not None and process.stderr is not None
     stdout_fd = process.stdout.fileno()
