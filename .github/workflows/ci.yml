@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+        python-version:
+          - "3.10"
+          - "3.11"
+          - "3.12"
+          - "3.13"
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: latest
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: uv
+
+      - name: Sync locked development environment
+        run: uv sync --locked --all-groups
+
+      - name: Check formatting
+        run: uv run ruff format --check .
+
+      - name: Check lint
+        run: uv run ruff check .
+
+      - name: Check types
+        run: uv run mypy src tests
+
+      - name: Run tests
+        run: uv run pytest -q
+
+      - name: Build wheel and source distribution
+        run: uv build
+
+      - name: Smoke-test the installed wheel
+        shell: bash
+        run: |
+          venv_path="$RUNNER_TEMP/worktree-provisioner-venv"
+          python -m venv "$venv_path"
+          wheel_path="$(find dist -maxdepth 1 -name '*.whl' -print -quit)"
+          test -n "$wheel_path"
+          "$venv_path/bin/python" -m pip install --no-index --no-deps "$wheel_path"
+          "$venv_path/bin/worktree-provisioner" --help
+          "$venv_path/bin/worktree-provisioner" --version

@@ -5,13 +5,28 @@ build-backend = "hatchling.build"
 [project]
 name = "worktree-provisioner"
 version = "0.1.0"
-description = "Manage Git linked worktrees across the create, list, show, and remove lifecycle"
+description = "Standalone CLI for safe Git linked worktree create, list, show, and remove operations"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 license-files = ["LICENSE"]
 authors = [{ name = "worktree-provisioner contributors" }]
 dependencies = []
+classifiers = [
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+]
+
+[project.urls]
+Homepage = "https://github.com/chemitaro/worktree-provisioner"
+Repository = "https://github.com/chemitaro/worktree-provisioner"
+Issues = "https://github.com/chemitaro/worktree-provisioner/issues"
 
 [project.scripts]
 worktree-provisioner = "worktree_provisioner.cli:main"
