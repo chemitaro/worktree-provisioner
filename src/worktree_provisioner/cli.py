@@ -18,6 +18,8 @@ from worktree_provisioner.application.contracts import (
     ExpectedError,
     ListRequest,
     ListResult,
+    RemoveRequest,
+    RemoveResult,
     ShowRequest,
     ShowResult,
 )
@@ -62,18 +64,6 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.command == "remove":
-        return _emit_error(
-            ExpectedError(
-                code="usage_error",
-                operation=args.command,
-                message=f"{args.command} is not implemented in this phase",
-                details={"command": args.command},
-                result=None,
-                status="error",
-            ),
-            json_mode=bool(getattr(args, "json", False)),
-        )
 
     ports = ApplicationPorts(
         git=GitCliGateway(),
@@ -107,7 +97,7 @@ def main(argv: list[str] | None = None) -> int:
             ) from exc
         service = WorktreeService(ports)
         if args.command == "create":
-            result: CreateResult | ListResult | ShowResult = service.create(
+            result: CreateResult | ListResult | ShowResult | RemoveResult = service.create(
                 CreateRequest(
                     repo_root=repo_root,
                     root=root,
@@ -117,8 +107,17 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif args.command == "list":
             result = service.list(ListRequest(repo_root=repo_root, root=root))
-        else:
+        elif args.command == "show":
             result = service.show(ShowRequest(repo_root=repo_root, root=root, target=args.target))
+        else:
+            result = service.remove(
+                RemoveRequest(
+                    repo_root=repo_root,
+                    root=root,
+                    target=args.target,
+                    force=args.force,
+                )
+            )
     except ExpectedError as exc:
         return _emit_error(exc, json_mode=json_mode)
     except Exception as exc:
@@ -136,7 +135,7 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _emit_success(result: CreateResult | ListResult | ShowResult, *, json_mode: bool) -> None:
+def _emit_success(result: CreateResult | ListResult | ShowResult | RemoveResult, *, json_mode: bool) -> None:
     if json_mode:
         print(
             json.dumps(
@@ -162,10 +161,16 @@ def _emit_success(result: CreateResult | ListResult | ShowResult, *, json_mode: 
         for worktree in result.worktrees:
             branch = worktree.branch or "-"
             print(f"{worktree.id}\t{branch}\t{worktree.path}")
-    else:
+    elif isinstance(result, ShowResult):
         print(
             "worktree-provisioner: ok (show) "
             f"id={result.worktree.id} branch={result.worktree.branch or '-'} path={result.worktree.path}"
+        )
+    else:
+        print(
+            "worktree-provisioner: ok (remove) "
+            f"target={result.target} path={result.resolved_target.path} "
+            f"removed_record={result.removed_record} removed_directory={result.removed_directory}"
         )
 
 
@@ -198,6 +203,14 @@ def _emit_error(error: ExpectedError, *, json_mode: bool) -> int:
             command = " ".join(result.bootstrap.command) if result.bootstrap.command else "-"
             exit_code = "" if result.bootstrap.exit_code is None else f" exit_code={result.bootstrap.exit_code}"
             print(f"worktree-provisioner: bootstrap status={result.bootstrap.status} command={command}{exit_code}")
+        elif isinstance(error.result, RemoveResult):
+            remove_result = error.result
+            print(
+                "worktree-provisioner: partial (remove) "
+                f"target={remove_result.target} path={remove_result.resolved_target.path} "
+                f"removed_record={remove_result.removed_record} "
+                f"removed_directory={remove_result.removed_directory}"
+            )
         print(f"worktree-provisioner: error: {error.message}", file=sys.stderr)
     return 1
 
@@ -229,15 +242,30 @@ def _result_payload(result: object | None) -> object | None:
         return _list_payload(result)
     if isinstance(result, ShowResult):
         return _show_payload(result)
+    if isinstance(result, RemoveResult):
+        return _remove_payload(result)
     return _json_safe(result)
 
 
-def _result_operation(result: CreateResult | ListResult | ShowResult) -> str:
+def _result_operation(result: CreateResult | ListResult | ShowResult | RemoveResult) -> str:
     if isinstance(result, CreateResult):
         return "create"
     if isinstance(result, ListResult):
         return "list"
-    return "show"
+    if isinstance(result, ShowResult):
+        return "show"
+    return "remove"
+
+
+def _remove_payload(result: RemoveResult) -> dict[str, object]:
+    return {
+        "target": result.target,
+        "resolved_target": _json_safe(result.resolved_target),
+        "force_requested": result.force_requested,
+        "removed_record": result.removed_record,
+        "removed_directory": result.removed_directory,
+        "branch_deleted": result.branch_deleted,
+    }
 
 
 def _bootstrap_payload(result: BootstrapResult) -> dict[str, object]:

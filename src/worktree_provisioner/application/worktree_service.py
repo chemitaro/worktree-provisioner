@@ -1,8 +1,4 @@
-"""Application service for Git linked worktree lifecycle operations.
-
-The service currently owns the create and inventory/show vertical slices;
-managed removal is added by the following implementation phase.
-"""
+"""Application service for Git linked worktree lifecycle operations."""
 
 from __future__ import annotations
 
@@ -24,6 +20,8 @@ from worktree_provisioner.application.contracts import (
     ListRequest,
     ListResult,
     Operation,
+    RemoveRequest,
+    RemoveResult,
     ShowRequest,
     ShowResult,
     WorktreeOrigin,
@@ -58,7 +56,7 @@ class _NamespaceContext:
 
 
 class WorktreeService:
-    """Application service implementing create, inventory, and show semantics."""
+    """Application service implementing the four lifecycle operations."""
 
     def __init__(self, ports: ApplicationPorts) -> None:
         self.ports = ports
@@ -214,6 +212,331 @@ class WorktreeService:
             ) from exc
         return ShowResult(target=request.target, worktree=record)
 
+    def remove(self, request: RemoveRequest) -> RemoveResult:
+        """Remove one managed worktree with a final fail-closed refresh.
+
+        The initial inventory is only a candidate check.  The Git inventory is
+        fetched again immediately before mutation and the original selector is
+        resolved against that snapshot.  Filesystem cleanup is deliberately
+        reachable only after Git reports success.
+        """
+
+        root = self._resolve_root(request.root, operation="remove")
+        initial_records = self._worktree_records(request.repo_root, operation="remove")
+        if not initial_records:
+            raise self._error(
+                code="git_worktree_list_failed",
+                message="git worktree list returned no worktree records",
+                details={},
+                operation="remove",
+            )
+        repo_basename = _record_canonical_path(initial_records[0]).name
+        if not repo_basename:
+            raise self._error(
+                code="git_worktree_list_failed",
+                message="invocation repository has no basename",
+                details={"repo_root": str(request.repo_root)},
+                operation="remove",
+            )
+
+        namespace = self._validate_remove_namespace(root, repo_basename)
+        initial_views = self._inventory_views(
+            request.repo_root,
+            root,
+            initial_records,
+            operation="remove",
+        )
+        initial = self._resolve_remove_target(initial_views, request.target, phase="initial", request=request)
+        initial_blockers = self._remove_blockers_for(
+            initial,
+            root=root,
+            namespace=namespace,
+            repo_root=request.repo_root,
+        )
+        if initial_blockers:
+            raise self._remove_blocked(request, initial, initial_blockers)
+
+        # Refresh every Git record and rebuild classification using the same
+        # root and repository namespace immediately before mutation.
+        refreshed_namespace = self._validate_remove_namespace(root, repo_basename)
+        refreshed_records = self._worktree_records(request.repo_root, operation="remove")
+        if not refreshed_records:
+            raise self._remove_blocked_without_target(
+                request,
+                blocker="record_missing_after_refresh",
+                message="worktree record disappeared during remove refresh",
+            )
+        refreshed_views = self._inventory_views(
+            request.repo_root,
+            root,
+            refreshed_records,
+            operation="remove",
+        )
+        refreshed = self._resolve_remove_target(refreshed_views, request.target, phase="refresh", request=request)
+        if canonical_path(initial.path) != canonical_path(refreshed.path):
+            raise self._remove_blocked(
+                request,
+                refreshed,
+                ("target_changed_after_refresh",),
+                message="worktree target changed during remove refresh",
+            )
+        if canonical_path(namespace) != canonical_path(refreshed_namespace):
+            raise self._remove_blocked(
+                request,
+                refreshed,
+                ("target_changed_after_refresh",),
+                message="managed namespace changed during remove refresh",
+            )
+
+        refreshed_blockers = self._remove_blockers_for(
+            refreshed,
+            root=root,
+            namespace=refreshed_namespace,
+            repo_root=request.repo_root,
+        )
+        if refreshed_blockers:
+            raise self._remove_blocked(request, refreshed, refreshed_blockers)
+
+        try:
+            self.ports.git.remove_worktree(
+                request.repo_root,
+                path=refreshed.path,
+                force=request.force,
+            )
+        except Exception as exc:
+            # No filesystem cleanup may happen on a Git refusal/failure.
+            raise self._error(
+                code="git_worktree_remove_failed",
+                message=f"git worktree remove failed for {refreshed.path}",
+                details={
+                    "target": request.target,
+                    "path": str(refreshed.path),
+                    "force_requested": request.force,
+                    "diagnostic": _bounded(str(exc)),
+                },
+                operation="remove",
+            ) from exc
+
+        cleanup_error = self._cleanup_after_remove(
+            request,
+            root=root,
+            namespace=refreshed_namespace,
+            target=refreshed,
+        )
+        if cleanup_error is not None:
+            raise self._error(
+                code="post_remove_cleanup_failed",
+                message="Git worktree record was removed but target cleanup failed",
+                details=cleanup_error,
+                result=RemoveResult(
+                    target=request.target,
+                    resolved_target=refreshed,
+                    force_requested=request.force,
+                    removed_record=True,
+                    removed_directory=False,
+                    branch_deleted=False,
+                ),
+                status="partial",
+                operation="remove",
+            )
+
+        return RemoveResult(
+            target=request.target,
+            resolved_target=refreshed,
+            force_requested=request.force,
+            removed_record=True,
+            removed_directory=True,
+            branch_deleted=False,
+        )
+
+    def _validate_remove_namespace(self, root: Path, repo_basename: str) -> Path:
+        """Validate a remove namespace before inventory or mutation."""
+
+        namespace = root / repo_basename
+        try:
+            kind = self.ports.filesystem.lstat_kind(namespace)
+        except Exception as exc:
+            raise self._error(
+                code="unsafe_namespace",
+                message=f"failed to inspect managed namespace: {namespace}",
+                details={"namespace": str(namespace), "diagnostic": _bounded(str(exc))},
+                operation="remove",
+            ) from exc
+        if kind in {"missing", "directory"}:
+            return namespace
+        raise self._error(
+            code="unsafe_namespace",
+            message=f"managed namespace is not a real directory: {namespace}",
+            details={"namespace": str(namespace), "reason": kind},
+            operation="remove",
+        )
+
+    def _resolve_remove_target(
+        self,
+        records: Sequence[WorktreeRecordView],
+        target: str,
+        *,
+        phase: str,
+        request: RemoveRequest,
+    ) -> WorktreeRecordView:
+        try:
+            return resolve_target(records, target)
+        except TargetResolutionError as exc:
+            if phase == "initial":
+                raise self._error(
+                    code=exc.code,
+                    message=str(exc),
+                    details=exc.details,
+                    operation="remove",
+                ) from exc
+            blocker: BlockerCode
+            if exc.code == "target_not_found":
+                blocker = "record_missing_after_refresh"
+                message = "worktree record disappeared during remove refresh"
+            else:
+                blocker = "target_changed_after_refresh"
+                message = "worktree target could not be re-resolved during remove refresh"
+            raise self._remove_blocked_without_target(
+                request,
+                blocker=blocker,
+                message=message,
+                details={"resolution_code": exc.code, **exc.details},
+            ) from exc
+
+    def _remove_blockers_for(
+        self,
+        record: WorktreeRecordView,
+        *,
+        root: Path,
+        namespace: Path,
+        repo_root: Path,
+    ) -> tuple[BlockerCode, ...]:
+        blockers = list(record.remove_blockers)
+        if self._is_protected_cleanup_path(record.path, root, namespace, repo_root):
+            blockers.append("protected_cleanup_path")
+        # Inventory classification is intentionally repeated at the remove
+        # boundary; a malformed view must fail closed rather than rely on a
+        # presentation-layer ``managed`` flag.
+        if not self._is_managed_path(record.path, namespace) and "outside_managed_namespace" not in blockers:
+            blockers.append("outside_managed_namespace")
+        return tuple(dict.fromkeys(blockers))
+
+    def _is_protected_cleanup_path(
+        self,
+        target: Path,
+        root: Path,
+        namespace: Path,
+        repo_root: Path,
+    ) -> bool:
+        lexical_target = _absolute_lexical_path(target)
+        try:
+            canonical_target = canonical_path(target)
+        except (OSError, RuntimeError):
+            return True
+        for protected in (root, namespace, repo_root):
+            lexical_protected = _absolute_lexical_path(protected)
+            try:
+                canonical_protected = canonical_path(protected)
+            except (OSError, RuntimeError):
+                return True
+            lexical_target_is_protected = (
+                lexical_target == lexical_protected or lexical_target in lexical_protected.parents
+            )
+            canonical_target_is_protected = (
+                canonical_target == canonical_protected or canonical_target in canonical_protected.parents
+            )
+            if lexical_target_is_protected or canonical_target_is_protected:
+                return True
+        return False
+
+    def _remove_blocked(
+        self,
+        request: RemoveRequest,
+        record: WorktreeRecordView,
+        blockers: Sequence[BlockerCode],
+        *,
+        message: str = "worktree removal is blocked by safety policy",
+    ) -> ExpectedError:
+        return self._error(
+            code="remove_blocked",
+            message=message,
+            details={
+                "target": request.target,
+                "worktree": record,
+                "resolved_target": record,
+                "remove_blockers": list(dict.fromkeys(blockers)),
+                "force_requested": request.force,
+            },
+            operation="remove",
+        )
+
+    def _remove_blocked_without_target(
+        self,
+        request: RemoveRequest,
+        *,
+        blocker: BlockerCode,
+        message: str,
+        details: Mapping[str, object] | None = None,
+    ) -> ExpectedError:
+        payload: dict[str, object] = {
+            "target": request.target,
+            "remove_blockers": [blocker],
+            "force_requested": request.force,
+        }
+        if details:
+            payload.update(details)
+        return self._error(
+            code="remove_blocked",
+            message=message,
+            details=payload,
+            operation="remove",
+        )
+
+    def _cleanup_after_remove(
+        self,
+        request: RemoveRequest,
+        *,
+        root: Path,
+        namespace: Path,
+        target: WorktreeRecordView,
+    ) -> dict[str, object] | None:
+        """Recheck containment and clean only the exact leftover target."""
+
+        try:
+            kind = self.ports.filesystem.lstat_kind(namespace)
+        except Exception as exc:
+            return {"reason": "namespace_recheck_failed", "diagnostic": _bounded(str(exc))}
+        if kind != "directory":
+            return {"reason": "unsafe_namespace_after_git", "namespace": str(namespace), "kind": kind}
+        if not self._is_managed_path(target.path, namespace) or self._is_protected_cleanup_path(
+            target.path, root, namespace, request.repo_root
+        ):
+            return {
+                "reason": "protected_or_outside_target_after_git",
+                "path": str(target.path),
+            }
+        try:
+            exists = self.ports.filesystem.path_exists_no_follow(target.path)
+        except Exception as exc:
+            return {"reason": "target_inspection_failed", "path": str(target.path), "diagnostic": _bounded(str(exc))}
+        if not exists:
+            return None
+        try:
+            self.ports.filesystem.remove_target_no_follow(target.path)
+        except Exception as exc:
+            # A target that disappeared between the existence check and the
+            # cleanup adapter is already clean.  Other races and permissions
+            # remain observable partial results.
+            if getattr(exc, "kind", None) == "missing":
+                return None
+            return {
+                "reason": "target_cleanup_failed",
+                "path": str(target.path),
+                "diagnostic": _bounded(str(exc)),
+                "kind": getattr(exc, "kind", None),
+            }
+        return None
+
     def _inventory_views(
         self,
         repo_root: Path,
@@ -339,30 +662,52 @@ class WorktreeService:
         lexical_namespace = _absolute_lexical_path(namespace)
         if not _is_strict_descendant(lexical_path, lexical_namespace):
             return False
-        canonical_namespace = canonical_path(namespace)
-        canonical_record = canonical_path(path)
-        if not _is_strict_descendant(canonical_record, canonical_namespace):
+        try:
+            canonical_namespace = canonical_path(namespace)
+            canonical_record = canonical_path(path)
+        except (OSError, RuntimeError):
             return False
+        if not _is_strict_descendant(canonical_record, canonical_namespace):
+            if not self._is_broken_final_symlink(path):
+                return False
+            # A broken final symlink has no canonical target to contain.  Its
+            # lexical entry is still strictly inside the namespace and can be
+            # safely unlinked without following it.
+            canonical_record = lexical_path
         try:
             relative = lexical_path.relative_to(lexical_namespace)
         except ValueError:
             return False
         current = lexical_namespace
-        for part in relative.parts:
+        for index, part in enumerate(relative.parts):
             current /= part
             try:
                 kind = self.ports.filesystem.lstat_kind(current)
             except Exception:
                 return False
-            if kind == "symlink":
+            # A symlink in the namespace ancestry can redirect a whole
+            # subtree.  The final target itself is allowed: post-Git cleanup
+            # explicitly removes that link without following it.
+            if kind == "symlink" and index != len(relative.parts) - 1:
                 return False
             if kind == "missing":
                 # A stale Git record may have no path at all.  No existing
                 # component can redirect it once the canonical check passed.
                 break
-            if kind == "other":
+            if kind == "other" and index != len(relative.parts) - 1:
                 return False
         return True
+
+    def _is_broken_final_symlink(self, path: Path) -> bool:
+        try:
+            if self.ports.filesystem.lstat_kind(path) != "symlink":
+                return False
+            path.resolve(strict=True)
+        except FileNotFoundError:
+            return True
+        except (OSError, RuntimeError):
+            return False
+        return False
 
     @staticmethod
     def _raw_inventory_id(
