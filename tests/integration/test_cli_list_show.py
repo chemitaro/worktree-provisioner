@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import os
+import subprocess
 from pathlib import Path
 from typing import Any
 
+import pytest
 from conftest import CliResult, TempGitRepository  # type: ignore[import-not-found]
 
 
@@ -39,6 +42,38 @@ def test_list_returns_main_managed_and_external_records(
     assert by_path[str(managed)]["origin"] == "managed_namespace"
     assert by_path[str(external)]["managed"] is False
     assert "outside_managed_namespace" in by_path[str(external)]["remove_blockers"]
+
+
+def test_non_utf8_linked_worktree_path_is_valid_json_and_removable(
+    temp_git_repo: TempGitRepository, central_root: Path, cli_runner, json_loads
+) -> None:
+    namespace = central_root / temp_git_repo.path.name
+    invalid_path = Path(
+        os.fsdecode(os.fsencode(namespace) + b"/" + temp_git_repo.path.name.encode() + b"-invalid-\xff")
+    )
+    invalid_path.parent.mkdir(parents=True)
+    added = subprocess.run(
+        ["git", "worktree", "add", "-b", "invalid-path", str(invalid_path)],
+        cwd=temp_git_repo.path,
+        capture_output=True,
+        text=False,
+        check=False,
+    )
+    if added.returncode != 0:
+        pytest.skip(f"Git/filesystem does not support this raw pathname: {os.fsdecode(added.stderr)}")
+
+    listed = cli_runner("list", "--json", repo=temp_git_repo.path, root=central_root)
+    listed_payload = _payload(listed, json_loads)
+    assert listed.returncode == 0, listed.stderr
+    listed_bytes = listed.stdout.encode("utf-8")
+    assert listed_bytes
+    assert any(record["path"] == str(invalid_path) for record in listed_payload["result"]["worktrees"])
+
+    removed = cli_runner("remove", str(invalid_path), "--json", repo=temp_git_repo.path, root=central_root)
+    removed_payload = _payload(removed, json_loads)
+    assert removed.returncode == 0, removed.stderr
+    assert removed_payload["status"] == "ok"
+    assert not invalid_path.exists()
 
 
 def test_show_supports_id_and_absolute_path_selectors(

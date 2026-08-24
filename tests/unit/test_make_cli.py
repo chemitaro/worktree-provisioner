@@ -309,6 +309,7 @@ def test_real_make_static_absence_refuses_make_flag_environment(
         "%: missing-prerequisite\n\t@echo pattern\n",
         "all: \\\n  other\nother:\n",
         "this is not a valid make statement\n",
+        "./Makefile: missing-source\n\t@false\n",
     ],
 )
 def test_real_make_dynamic_or_ambiguous_absence_is_detection_failure(tmp_path: Path, makefile: str) -> None:
@@ -329,6 +330,59 @@ def test_real_make_missing_init_prerequisite_is_not_skipped(tmp_path: Path) -> N
         "init: missing-prerequisite\n\t@echo init\n",
         encoding="utf-8",
     )
+
+    result = MakeCliGateway().run_make_init_if_available(tmp_path)
+
+    assert result.status == "detection_failed"
+    assert result.exit_code != 0
+
+
+def test_real_make_parse_like_rule_error_is_not_static_absence(tmp_path: Path) -> None:
+    if shutil.which("make") is None:
+        pytest.skip("make is unavailable")
+    (tmp_path / "Makefile").write_text(
+        "all: ; @echo all\nfoo: prerequisite: malformed\n",
+        encoding="utf-8",
+    )
+
+    result = MakeCliGateway().run_make_init_if_available(tmp_path)
+
+    assert result.status == "detection_failed"
+    assert result.exit_code != 0
+
+
+def test_real_make_orphan_recipe_is_not_static_absence(tmp_path: Path) -> None:
+    if shutil.which("make") is None:
+        pytest.skip("make is unavailable")
+    (tmp_path / "Makefile").write_text("\t@echo orphan\nall:\n", encoding="utf-8")
+
+    result = MakeCliGateway().run_make_init_if_available(tmp_path)
+
+    assert result.status == "detection_failed"
+    assert result.exit_code != 0
+
+
+def test_real_make_makefile_remake_failure_is_not_static_absence(tmp_path: Path) -> None:
+    if shutil.which("make") is None:
+        pytest.skip("make is unavailable")
+    (tmp_path / "Makefile").write_text(
+        "Makefile: missing-source\n\t@false\n",
+        encoding="utf-8",
+    )
+
+    result = MakeCliGateway().run_make_init_if_available(tmp_path)
+
+    assert result.status == "detection_failed"
+    assert result.exit_code != 0
+
+
+def test_real_make_makefiles_injection_is_not_static_absence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    if shutil.which("make") is None:
+        pytest.skip("make is unavailable")
+    (tmp_path / "Makefile").write_text("all:\n", encoding="utf-8")
+    injected = tmp_path / "injected.mk"
+    injected.write_text("$(error injected source failure)\n", encoding="utf-8")
+    monkeypatch.setenv("MAKEFILES", str(injected))
 
     result = MakeCliGateway().run_make_init_if_available(tmp_path)
 

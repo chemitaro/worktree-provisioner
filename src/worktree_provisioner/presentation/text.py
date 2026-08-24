@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from worktree_provisioner.application.contracts import CreateResult, ExpectedError, ListResult, RemoveResult, ShowResult
+from worktree_provisioner.application.contracts import (
+    CreateResult,
+    ExpectedError,
+    ListResult,
+    RemoveResult,
+    ResultWarning,
+    ShowResult,
+)
 
 
 def render_success(result: CreateResult | ListResult | ShowResult | RemoveResult) -> str:
@@ -60,8 +67,22 @@ def render_error(error: ExpectedError) -> tuple[str, str]:
             f"target={remove_result.target} path={_absolute_path(remove_result.resolved_target.path)} "
             f"removed_record={remove_result.removed_record} removed_directory={remove_result.removed_directory}"
         )
-    stderr = f"worktree-provisioner: error: {error.message}"
+    stderr_lines = [f"worktree-provisioner: error: {error.message}"]
+    stderr_lines.extend(render_warnings(error.result))
+    stderr = "\n".join(stderr_lines)
     return stdout, stderr
+
+
+def render_warnings(result: object) -> tuple[str, ...]:
+    if not isinstance(result, CreateResult):
+        return ()
+    return tuple(_warning_line(warning) for warning in result.warnings)
+
+
+def _warning_line(warning: ResultWarning) -> str:
+    message = warning.message.replace("\r", "\\r").replace("\n", "\\n")
+    safe_message = message.encode("utf-8", errors="backslashreplace").decode("utf-8")
+    return f"worktree-provisioner: warning: code={warning.code} message={safe_message}"
 
 
 def _absolute_path(path: Path) -> str:
@@ -69,4 +90,4 @@ def _absolute_path(path: Path) -> str:
     return str(candidate if candidate.is_absolute() else candidate.absolute())
 
 
-__all__ = ["render_error", "render_success"]
+__all__ = ["render_error", "render_success", "render_warnings"]

@@ -5,6 +5,15 @@ from pathlib import Path
 
 from conftest import TempGitRepository  # type: ignore[import-not-found]
 
+from worktree_provisioner.application.contracts import CreateRequest
+from worktree_provisioner.application.ports import ApplicationPorts
+from worktree_provisioner.application.worktree_service import WorktreeService
+from worktree_provisioner.infra.environment import EnvironmentAdapter
+from worktree_provisioner.infra.filesystem import FilesystemCliGateway
+from worktree_provisioner.infra.git_cli import GitCliGateway
+from worktree_provisioner.infra.make_cli import MakeCliGateway
+from worktree_provisioner.presentation import json_v1, text
+
 
 def test_create_json_contract_has_absolute_facts(
     temp_git_repo: TempGitRepository, central_root: Path, cli_runner, json_loads
@@ -29,6 +38,61 @@ def test_create_json_contract_has_absolute_facts(
         "branch_exists": True,
         "worktree_record_exists": True,
     }
+
+
+def test_create_retries_real_git_path_race_and_retains_partial_branch(
+    temp_git_repo: TempGitRepository, central_root: Path, monkeypatch
+) -> None:
+    original_add = GitCliGateway.add_worktree
+    attempts = 0
+
+    def race_once(gateway: GitCliGateway, repo_root: Path, *, path: Path, branch: str) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            path.mkdir(parents=True)
+            (path / "concurrent-file").write_text("race\n", encoding="utf-8")
+        original_add(gateway, repo_root, path=path, branch=branch)
+
+    monkeypatch.setattr(GitCliGateway, "add_worktree", race_once)
+    git = GitCliGateway()
+    result = WorktreeService(
+        ApplicationPorts(
+            git=git,
+            bootstrap=MakeCliGateway(),
+            filesystem=FilesystemCliGateway(),
+            environment=EnvironmentAdapter(),
+        )
+    ).create(
+        CreateRequest(
+            repo_root=temp_git_repo.path,
+            root=central_root,
+            label=None,
+            bootstrap_enabled=False,
+        )
+    )
+
+    failed_path = central_root / temp_git_repo.path.name / f"{temp_git_repo.path.name}-wt1"
+    assert attempts == 2
+    assert result.id == "wt2"
+    assert failed_path.is_dir()
+    assert (failed_path / "concurrent-file").read_text(encoding="utf-8") == "race\n"
+    assert git.local_branch_exists(temp_git_repo.path, "main-wt1")
+    assert result.worktree_path == central_root / temp_git_repo.path.name / f"{temp_git_repo.path.name}-wt2"
+    assert len(result.warnings) == 1
+    warning = result.warnings[0]
+    assert warning.code == "collision_partial_artifact"
+    assert "branch=main-wt1" in warning.message
+    assert f"path={failed_path}" in warning.message
+    assert "path_exists=True" in warning.message
+    assert "branch_exists=True" in warning.message
+
+    document = json_v1.success_document(result)
+    assert document["warnings"] == [{"code": warning.code, "message": warning.message}]
+    text_warnings = text.render_warnings(result)
+    assert len(text_warnings) == 1
+    assert "worktree-provisioner: warning: code=collision_partial_artifact" in text_warnings[0]
+    assert "branch=main-wt1" in text_warnings[0]
 
 
 def test_create_without_label_text_contract_uses_wt1_and_absolute_path(

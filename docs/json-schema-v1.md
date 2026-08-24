@@ -22,10 +22,14 @@
 | `operation` | `create` / `list` / `show` / `remove` / `null` | 実行した command。parse 前の usage error は `null` の場合がある |
 | `result` | object / `null` | 成功または partial の operation payload |
 | `error` | object / `null` | `code`、`message`、`details`。成功時は `null` |
-| `warnings` | array | `{code, message}` の warning。通常は空配列 |
+| `warnings` | array | `{code, message}` の warning。通常は空配列。retryで保持されたGit artifactは `collision_partial_artifact` として通知する |
 
 expected JSON error は `status=error` または `status=partial` であり、`error.code` を機械判定に使用します。message wording は
 stable contract ではありません。usage error の終了コードは `2`、operational error と partial は `1` です。
+
+`collision_partial_artifact` warningは、typed Git collisionのretry後もfailed candidateのbranch/pathまたはworktree recordが
+観測された場合に出力されます。`message`にはcandidateの`id`、branch、absolute path、各artifactの観測状態をboundedに含みます。
+Gitのrollbackやbranch削除は行われません。
 
 ## Operation payloads
 

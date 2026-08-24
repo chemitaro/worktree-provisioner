@@ -329,7 +329,7 @@ _UNSAFE_MAKE_DIRECTIVE = re.compile(
     re.IGNORECASE,
 )
 _MAKE_ASSIGNMENT = re.compile(r"^(?P<name>[A-Za-z_][A-Za-z0-9_.-]*)\s*(?::=|\?=|\+=|!=|=)")
-_MAKE_AUTHORITY_VARIABLES = frozenset({"MAKEFLAGS", "MAKEOVERRIDES", "GNUMAKEFLAGS"})
+_MAKE_AUTHORITY_VARIABLES = frozenset({"MAKEFLAGS", "MAKEOVERRIDES", "GNUMAKEFLAGS", "MAKEFILES", "MAKEFILE_LIST"})
 
 
 def _run_direct_detection(make_executable: str, cwd: Path) -> tuple[subprocess.CompletedProcess[str], bool]:
@@ -347,7 +347,10 @@ def _static_proves_init_absent(makefile: Path) -> bool:
     conservative detection failure instead of a false ``skipped`` result.
     """
 
-    if any(name in os.environ for name in ("MAKEFLAGS", "MAKEOVERRIDES", "GNUMAKEFLAGS")):
+    # These variables alter the makefile graph or command-line state outside
+    # this file.  A direct non-zero probe cannot prove that ``init`` is absent
+    # while any of them is active, so fail closed.
+    if any(name in os.environ for name in _MAKE_AUTHORITY_VARIABLES):
         return False
     try:
         with makefile.open("rb") as stream:
@@ -363,11 +366,14 @@ def _static_proves_init_absent(makefile: Path) -> bool:
     if "\ufeff" in text:
         return False
 
+    saw_rule = False
     for raw_line in text.splitlines():
         line = raw_line.rstrip("\r")
         if _has_line_continuation(line):
             return False
         if line.startswith("\t"):
+            if not saw_rule:
+                return False
             if "$" in line or any(name in line for name in _MAKE_AUTHORITY_VARIABLES | {"origin"}):
                 return False
             continue
@@ -395,14 +401,31 @@ def _static_proves_init_absent(makefile: Path) -> bool:
         if not left or "\\" in left:
             return False
         if left == ".PHONY":
-            if "init" in semantic[colon + 1 :].split():
+            if any(token == "init" or _is_makefile_target(token) for token in semantic[colon + 1 :].split()):
                 return False
+            saw_rule = True
             continue
         if left.startswith("."):
             return False
         if "init" in left.split():
             return False
+        # A rule that can remake the selected makefile means the direct
+        # failure may depend on a generated/reloaded source.  It is not safe
+        # to reinterpret that graph with a source-only absence proof.
+        if any(_is_makefile_target(token) for token in left.split()):
+            return False
+        # Multiple unescaped colons in a normal rule header are ambiguous to
+        # this deliberately small proof (double-colon rules are rejected as
+        # well).  Let make's direct failure remain detection_failed instead of
+        # guessing whether the text was a valid rule.
+        if ":" in semantic[colon + 1 :]:
+            return False
+        saw_rule = True
     return True
+
+
+def _is_makefile_target(token: str) -> bool:
+    return token in _MAKEFILE_NAMES or Path(token).name in _MAKEFILE_NAMES
 
 
 def _has_line_continuation(line: str) -> bool:

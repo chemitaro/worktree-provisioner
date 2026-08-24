@@ -127,6 +127,14 @@ class ArtifactState:
 
 
 @dataclass(frozen=True, slots=True)
+class ResultWarning:
+    """A bounded machine-readable warning attached to an operation result."""
+
+    code: str
+    message: str
+
+
+@dataclass(frozen=True, slots=True)
 class WorktreeRecordView:
     """Inventory record enriched with classification and removal policy facts."""
 
@@ -168,6 +176,7 @@ class CreateResult:
     branch: str
     bootstrap: BootstrapResult
     artifacts: ArtifactState
+    warnings: tuple[ResultWarning, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

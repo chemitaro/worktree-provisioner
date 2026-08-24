@@ -204,6 +204,9 @@ def _emit_success(result: _RESULT, *, json_mode: bool) -> None:
         print(json_v1.dumps(json_v1.success_document(result)))
     else:
         print(text.render_success(result))
+        warnings = text.render_warnings(result)
+        if warnings:
+            print("\n".join(warnings), file=sys.stderr)
 
 
 def _emit_error(error: ExpectedError, *, json_mode: bool) -> int:

@@ -22,6 +22,7 @@ from worktree_provisioner.application.contracts import (
     Operation,
     RemoveRequest,
     RemoveResult,
+    ResultWarning,
     ShowRequest,
     ShowResult,
     WorktreeOrigin,
@@ -45,6 +46,7 @@ from worktree_provisioner.application.target_resolver import TargetResolutionErr
 
 _DETECTION_COMMAND: Final[tuple[str, ...]] = ("make", "-n", "init")
 _DIAGNOSTIC_LIMIT: Final[int] = 4096
+_COLLISION_WARNING_CODE: Final[str] = "collision_partial_artifact"
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +117,7 @@ class WorktreeService:
         except RootResolutionError as exc:
             raise self._error(code=exc.code, message=str(exc), details=exc.details) from exc
 
+        warnings: list[ResultWarning] = []
         try:
             self.ports.git.add_worktree(
                 request.repo_root,
@@ -131,6 +134,7 @@ class WorktreeService:
             if is_retryable_git_collision(exc):
                 refreshed = self._try_refresh_records(request.repo_root)
                 if refreshed is not None and _collision_retry_is_safe(exc, artifacts, candidate, refreshed):
+                    _append_collision_warning(warnings, candidate, artifacts)
                     # A recognised race is the only path allowed to retry.
                     # Preserve any created artifacts; the next attempt gets a
                     # fresh inventory snapshot and a new candidate.
@@ -144,6 +148,7 @@ class WorktreeService:
                         namespace=namespace,
                         records=refreshed,
                         failed_candidate=candidate,
+                        warnings=warnings,
                     )
             raise self._error(
                 code="git_worktree_add_failed",
@@ -895,6 +900,7 @@ class WorktreeService:
         root: Path,
         namespace: Path,
         main_worktree_path: Path,
+        warnings: Sequence[ResultWarning] = (),
     ) -> CreateResult:
         artifacts = self._observe_artifacts(request.repo_root, candidate, namespace)
         disabled = BootstrapResult(
@@ -912,6 +918,7 @@ class WorktreeService:
             branch=candidate.branch,
             bootstrap=disabled,
             artifacts=artifacts,
+            warnings=tuple(warnings),
         )
 
     def _run_bootstrap(self, worktree_path: Path) -> BootstrapResult:
@@ -966,6 +973,7 @@ class WorktreeService:
         namespace: Path,
         records: builtins.list[GitWorktreeRecord],
         failed_candidate: WorktreeCandidate,
+        warnings: builtins.list[ResultWarning],
     ) -> CreateResult:
         """Continue a recognised add collision without recursive call growth."""
 
@@ -1005,6 +1013,7 @@ class WorktreeService:
                 if is_retryable_git_collision(exc):
                     refreshed = self._try_refresh_records(request.repo_root)
                     if refreshed is not None and _collision_retry_is_safe(exc, artifacts, candidate, refreshed):
+                        _append_collision_warning(warnings, candidate, artifacts)
                         known_paths = {_record_canonical_path(record) for record in refreshed}
                         continue
                 raise self._error(
@@ -1024,6 +1033,7 @@ class WorktreeService:
                 root=root,
                 namespace=namespace,
                 main_worktree_path=main_worktree_path,
+                warnings=warnings,
             )
             if not request.bootstrap_enabled:
                 return result
@@ -1037,6 +1047,7 @@ class WorktreeService:
                 branch=result.branch,
                 bootstrap=bootstrap,
                 artifacts=artifacts,
+                warnings=result.warnings,
             )
             if bootstrap.status == "detection_failed":
                 raise self._error(
@@ -1229,6 +1240,34 @@ def _artifact_dict(result: ArtifactState) -> dict[str, bool | None]:
     }
 
 
+def _append_collision_warning(
+    warnings: builtins.list[ResultWarning],
+    candidate: WorktreeCandidate,
+    artifacts: ArtifactState,
+) -> None:
+    """Expose every retained collision artifact without unbounded text."""
+
+    if not any(
+        value is True
+        for value in (
+            artifacts.worktree_path_exists,
+            artifacts.branch_exists,
+            artifacts.worktree_record_exists,
+        )
+    ):
+        return
+    message = (
+        "retry retained candidate artifacts: "
+        f"id={_bounded(candidate.id, limit=128)} "
+        f"branch={_bounded(candidate.branch, limit=256)} "
+        f"path={_bounded(str(candidate.path), limit=1024)} "
+        f"path_exists={artifacts.worktree_path_exists} "
+        f"branch_exists={artifacts.branch_exists} "
+        f"worktree_record_exists={artifacts.worktree_record_exists}"
+    )
+    warnings.append(ResultWarning(code=_COLLISION_WARNING_CODE, message=_bounded(message)))
+
+
 def _collision_retry_is_safe(
     error: BaseException,
     artifacts: ArtifactState,
@@ -1269,16 +1308,30 @@ def _collision_retry_is_safe(
     if kind == "path":
         # The path itself is the expected collider.  A branch or worktree
         # record in addition to it indicates an attempt-derived mutation.
+        # Git's ``worktree add -b`` creates the branch before it checks the
+        # target directory.  A path race therefore legitimately leaves the
+        # candidate branch behind even though no worktree record exists.  The
+        # typed path collision and the absence of a matching record keep this
+        # narrow; the branch is deliberately retained (no rollback).
         return (
-            artifacts.worktree_path_exists is True
-            and artifacts.branch_exists is False
-            and artifacts.worktree_record_exists is False
-            and not matching_branch_record
-        ) or (
-            artifacts.worktree_path_exists is False
-            and artifacts.branch_exists is False
-            and artifacts.worktree_record_exists is False
-            and not matching_branch_record
+            (
+                artifacts.worktree_path_exists is True
+                and artifacts.branch_exists is False
+                and artifacts.worktree_record_exists is False
+                and not matching_branch_record
+            )
+            or (
+                artifacts.worktree_path_exists is True
+                and artifacts.branch_exists is True
+                and artifacts.worktree_record_exists is False
+                and not matching_branch_record
+            )
+            or (
+                artifacts.worktree_path_exists is False
+                and artifacts.branch_exists is False
+                and artifacts.worktree_record_exists is False
+                and not matching_branch_record
+            )
         )
 
     # A checked-out collision is proven by the same branch being recorded at a

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any, cast, get_args
 
@@ -12,10 +13,12 @@ from worktree_provisioner.application.contracts import (
     ExpectedError,
     ListResult,
     RemoveResult,
+    ResultWarning,
     ShowResult,
     WorktreeRecordView,
 )
 from worktree_provisioner.presentation.json_v1 import (
+    dumps,
     envelope,
     error_document,
     json_value,
@@ -148,6 +151,17 @@ def test_all_public_error_codes_are_emittable() -> None:
         assert document["warnings"] == []
 
 
+def test_dumps_escapes_surrogateescape_paths_as_reversible_utf8() -> None:
+    surrogate_path = "/tmp/repo-\udcff"
+
+    serialized = dumps({"path": surrogate_path, "label": "日本語"})
+
+    assert serialized.encode("utf-8")
+    assert r"\udcff" in serialized
+    assert json.loads(serialized)["path"] == surrogate_path
+    assert json.loads(serialized)["label"] == "日本語"
+
+
 def test_all_blocker_codes_are_explicitly_typed_in_worktree_payload() -> None:
     blockers = get_args(BlockerCode)
     for blocker in blockers:
@@ -245,6 +259,24 @@ def test_warning_objects_are_reduced_to_code_and_message() -> None:
     )
 
     assert document["warnings"] == [{"code": "diagnostic", "message": "a warning"}]
+
+
+def test_create_result_warnings_are_emitted_at_envelope_level() -> None:
+    result = CreateResult(
+        id="wt2",
+        main_worktree_path=Path("/repo"),
+        container_path=Path("/worktrees/repo"),
+        worktree_path=Path("/worktrees/repo/repo-wt2"),
+        branch="main-wt2",
+        bootstrap=BootstrapResult(requested=False, status="disabled", command=None, exit_code=None, detail=None),
+        artifacts=ArtifactState(True, True, True, True),
+        warnings=(ResultWarning(code="collision_partial_artifact", message="retained wt1"),),
+    )
+
+    document = success_document(result)
+
+    assert document["warnings"] == [{"code": "collision_partial_artifact", "message": "retained wt1"}]
+    assert "warnings" not in cast(dict[str, Any], document["result"])
 
 
 def test_partial_keeps_result_and_usage_error_is_versioned() -> None:

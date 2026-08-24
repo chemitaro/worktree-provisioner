@@ -8,6 +8,7 @@ from worktree_provisioner.application.contracts import (
     CreateResult,
     ExpectedError,
     RemoveResult,
+    ResultWarning,
     WorktreeRecordView,
 )
 from worktree_provisioner.presentation.text import render_error, render_success
@@ -101,3 +102,29 @@ def test_partial_remove_text_preserves_mutation_facts() -> None:
     assert "removed_record=True" in stdout
     assert "removed_directory=False" in stdout
     assert stderr.startswith("worktree-provisioner: error:")
+
+
+def test_create_warning_is_rendered_for_stderr() -> None:
+    result = _create()
+    result = CreateResult(
+        id=result.id,
+        main_worktree_path=result.main_worktree_path,
+        container_path=result.container_path,
+        worktree_path=result.worktree_path,
+        branch=result.branch,
+        bootstrap=result.bootstrap,
+        artifacts=result.artifacts,
+        warnings=(ResultWarning(code="collision_partial_artifact", message="retained wt1"),),
+    )
+    error = ExpectedError(
+        code="bootstrap_failed",
+        operation="create",
+        message="make init failed; worktree was retained",
+        details={},
+        result=result,
+        status="partial",
+    )
+
+    _stdout, stderr = render_error(error)
+
+    assert "worktree-provisioner: warning: code=collision_partial_artifact message=retained wt1" in stderr

@@ -21,6 +21,7 @@ from worktree_provisioner.application.contracts import (
     GitWorktreeRecord,
     ListResult,
     RemoveResult,
+    ResultWarning,
     ShowResult,
     WorktreeRecordView,
 )
@@ -36,6 +37,7 @@ def success_document(result: object) -> dict[str, object]:
         operation=operation_for_result(result),
         result=result,
         error=None,
+        warnings=_warnings_for_result(result),
     )
 
 
@@ -48,6 +50,7 @@ def error_document(error: ExpectedError) -> dict[str, object]:
         operation=error.operation,
         result=result,
         error=error,
+        warnings=_warnings_for_result(result),
     )
 
 
@@ -74,7 +77,7 @@ def envelope(
     operation: str | None,
     result: object | None,
     error: ExpectedError | None,
-    warnings: Sequence[Mapping[str, object]] = (),
+    warnings: Sequence[Mapping[str, object] | ResultWarning] = (),
 ) -> dict[str, object]:
     """Build the common v1 envelope with all fields present."""
 
@@ -89,12 +92,15 @@ def envelope(
 
     warning_payloads: list[dict[str, object]] = []
     for warning in warnings:
-        warning_payloads.append(
-            {
-                "code": str(warning.get("code", "diagnostic")),
-                "message": str(warning.get("message", "")),
-            }
-        )
+        if isinstance(warning, ResultWarning):
+            warning_payloads.append({"code": warning.code, "message": warning.message})
+        else:
+            warning_payloads.append(
+                {
+                    "code": str(warning.get("code", "diagnostic")),
+                    "message": str(warning.get("message", "")),
+                }
+            )
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -106,10 +112,21 @@ def envelope(
     }
 
 
+def _warnings_for_result(result: object | None) -> tuple[ResultWarning, ...]:
+    if isinstance(result, CreateResult):
+        return result.warnings
+    return ()
+
+
 def dumps(document: Mapping[str, object]) -> str:
     """Serialize exactly one v1 document without a trailing human message."""
 
-    return json.dumps(document, ensure_ascii=False)
+    # Keep human-readable UTF-8 for ordinary paths.  ``os.fsdecode`` uses
+    # surrogateescape for undecodable Unix pathname bytes; those surrogates
+    # cannot be written to a UTF-8 text stream with ``ensure_ascii=False``.
+    # Escaping only such documents keeps the representation valid UTF-8 and
+    # reversible while preserving the existing non-ASCII path contract.
+    return json.dumps(document, ensure_ascii=_contains_surrogate(document))
 
 
 def operation_for_result(result: object) -> str:
@@ -247,6 +264,16 @@ def remove_payload(result: RemoveResult) -> dict[str, object]:
 def _absolute_path(path: Path) -> str:
     candidate = path.expanduser()
     return str(candidate if candidate.is_absolute() else candidate.absolute())
+
+
+def _contains_surrogate(value: object) -> bool:
+    if isinstance(value, str):
+        return any(0xD800 <= ord(character) <= 0xDFFF for character in value)
+    if isinstance(value, Mapping):
+        return any(_contains_surrogate(key) or _contains_surrogate(item) for key, item in value.items())
+    if isinstance(value, (tuple, list, set)):
+        return any(_contains_surrogate(item) for item in value)
+    return False
 
 
 def _bounded(value: str, limit: int = 4096) -> str:
