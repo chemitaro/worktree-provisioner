@@ -12,6 +12,7 @@ from worktree_provisioner.application.ports import GitGateway
 from worktree_provisioner.infra.git_cli import (
     GitAdapterError,
     GitCliGateway,
+    _git_environment,
     parse_worktree_porcelain,
 )
 
@@ -110,6 +111,53 @@ def test_parser_returns_no_fabricated_record_for_empty_or_malformed_output(text:
 def test_git_gateway_conforms_to_protocol() -> None:
     gateway: GitGateway = GitCliGateway()
     assert isinstance(gateway, GitCliGateway)
+
+
+def test_git_environment_removes_repository_authority_but_preserves_user_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = {
+        "GIT_DIR": "/repo-b/.git",
+        "GIT_WORK_TREE": "/repo-b",
+        "GIT_COMMON_DIR": "/repo-b/.git",
+        "GIT_OBJECT_DIRECTORY": "/repo-b/.git/objects",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES": "/repo-b/.git/objects",
+        "GIT_INDEX_FILE": "/repo-b/.git/index",
+        "GIT_GRAFT_FILE": "/repo-b/.git/info/grafts",
+        "GIT_SHALLOW_FILE": "/repo-b/.git/shallow",
+        "GIT_NAMESPACE": "other",
+        "GIT_PREFIX": "other/",
+        "GIT_INTERNAL_SUPER_PREFIX": "other/",
+        "GIT_IMPLICIT_WORK_TREE": "0",
+        "GIT_CEILING_DIRECTORIES": "/repo-b",
+        "GIT_DISCOVERY_ACROSS_FILESYSTEM": "1",
+        "GIT_NO_REPLACE_OBJECTS": "0",
+        "GIT_REPLACE_REF_BASE": "refs/replace/other/",
+        "GIT_QUARANTINE_PATH": "/repo-b/.git/objects/incoming",
+        "GIT_CONFIG": "/repo-b/config",
+        "GIT_CONFIG_SYSTEM": "/repo-b/system-config",
+        "GIT_CONFIG_GLOBAL": "/repo-b/global-config",
+        "GIT_CONFIG_XDG": "/repo-b/xdg-config",
+        "GIT_CONFIG_NOSYSTEM": "0",
+        "GIT_CONFIG_DISABLE": "0",
+        "GIT_CONFIG_ENVIRONMENT": "/repo-b/environment-config",
+        "GIT_CONFIG_EXTENSIONS": "other",
+        "GIT_CONFIG_PARAMETERS": "'core.repositoryformatversion'='99'",
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "core.repositoryformatversion",
+        "GIT_CONFIG_VALUE_0": "99",
+    }
+    for key, value in authority.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("GIT_PAGER", "less")
+    monkeypatch.setenv("GIT_EDITOR", "vi")
+
+    environment = _git_environment()
+
+    assert all(key not in environment for key in authority)
+    assert environment["GIT_PAGER"] == "less"
+    assert environment["GIT_EDITOR"] == "vi"
+    assert environment["LC_ALL"] == "C"
 
 
 def test_git_gateway_uses_exact_argv_and_preserves_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -257,6 +305,85 @@ def test_real_git_trailing_space_repository_mutation_boundary(tmp_path: Path) ->
     gateway.remove_worktree(repo, path=linked, force=False)
     assert not linked.exists()
     assert all(record.path != linked.resolve() for record in gateway.worktree_list(repo))
+
+
+def test_real_git_repository_authority_environment_cannot_redirect_mutations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    git = shutil.which("git")
+    if git is None:
+        pytest.skip("git is unavailable")
+    repo_a = tmp_path / "repo-a"
+    repo_b = tmp_path / "repo-b"
+
+    def init_repo(repo: Path, marker: str) -> None:
+        repo.mkdir()
+
+        def run_git(*args: str) -> None:
+            subprocess.run(
+                [git, *args],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+
+        run_git("init", "--quiet")
+        run_git("config", "user.email", "test@example.invalid")
+        run_git("config", "user.name", "Worktree Provisioner Test")
+        (repo / "README").write_text(f"{marker}\n", encoding="utf-8")
+        run_git("add", "README")
+        run_git("commit", "--quiet", "-m", marker)
+
+    init_repo(repo_a, "repo-a")
+    init_repo(repo_b, "repo-b")
+    linked = tmp_path / "repo-a-linked"
+    authority = {
+        "GIT_DIR": str(repo_b / ".git"),
+        "GIT_WORK_TREE": str(repo_b),
+        "GIT_COMMON_DIR": str(repo_b / ".git"),
+        "GIT_OBJECT_DIRECTORY": str(repo_b / ".git" / "objects"),
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(repo_b / ".git" / "objects"),
+        "GIT_INDEX_FILE": str(repo_b / ".git" / "index"),
+        "GIT_GRAFT_FILE": str(repo_b / ".git" / "info" / "grafts"),
+        "GIT_SHALLOW_FILE": str(repo_b / ".git" / "shallow"),
+        "GIT_NAMESPACE": "other",
+        "GIT_PREFIX": "other/",
+        "GIT_INTERNAL_SUPER_PREFIX": "other/",
+        "GIT_IMPLICIT_WORK_TREE": "0",
+        "GIT_CEILING_DIRECTORIES": str(repo_b),
+        "GIT_DISCOVERY_ACROSS_FILESYSTEM": "1",
+        "GIT_NO_REPLACE_OBJECTS": "0",
+        "GIT_REPLACE_REF_BASE": "refs/replace/other/",
+        "GIT_QUARANTINE_PATH": str(repo_b / ".git" / "objects" / "incoming"),
+        "GIT_CONFIG": str(repo_b / "config"),
+        "GIT_CONFIG_SYSTEM": str(repo_b / "system-config"),
+        "GIT_CONFIG_GLOBAL": str(repo_b / "global-config"),
+        "GIT_CONFIG_XDG": str(repo_b / "xdg-config"),
+        "GIT_CONFIG_NOSYSTEM": "0",
+        "GIT_CONFIG_DISABLE": "0",
+        "GIT_CONFIG_ENVIRONMENT": str(repo_b / "environment-config"),
+        "GIT_CONFIG_EXTENSIONS": "other",
+        "GIT_CONFIG_PARAMETERS": "'core.repositoryformatversion'='99'",
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "core.repositoryformatversion",
+        "GIT_CONFIG_VALUE_0": "99",
+    }
+    for key, value in authority.items():
+        monkeypatch.setenv(key, value)
+
+    gateway = GitCliGateway()
+    assert gateway.resolve_checkout_root(repo_a) == repo_a.resolve()
+    assert [record.path for record in gateway.worktree_list(repo_a)] == [repo_a.resolve()]
+
+    gateway.add_worktree(repo_a, path=linked, branch="repo-a-linked")
+    assert linked.is_dir()
+    assert any(record.path == linked.resolve() for record in gateway.worktree_list(repo_a))
+    assert all(record.path != linked.resolve() for record in gateway.worktree_list(repo_b))
+
+    gateway.remove_worktree(repo_a, path=linked, force=False)
+    assert not linked.exists()
+    assert [record.path for record in gateway.worktree_list(repo_b)] == [repo_b.resolve()]
 
 
 @pytest.mark.parametrize(

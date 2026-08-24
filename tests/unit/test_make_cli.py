@@ -196,7 +196,7 @@ def test_real_make_capture_is_bounded_and_redacted(tmp_path: Path) -> None:
     assert "[REDACTED]" in result.detail
 
 
-def test_real_make_structural_probe_finds_init_after_long_prelude(tmp_path: Path) -> None:
+def test_real_make_direct_detection_finds_init_after_long_prelude(tmp_path: Path) -> None:
     if shutil.which("make") is None:
         pytest.skip("make is unavailable")
     prelude = "".join(f"PRELUDE_{index} := value-{index}\n" for index in range(1500))
@@ -212,7 +212,7 @@ def test_real_make_structural_probe_finds_init_after_long_prelude(tmp_path: Path
 
 
 @pytest.mark.parametrize("makefile", ["init:\n", "init: prerequisite\nprerequisite:\n"])
-def test_real_make_structural_probe_accepts_init_without_recipe(tmp_path: Path, makefile: str) -> None:
+def test_real_make_direct_detection_accepts_init_without_recipe(tmp_path: Path, makefile: str) -> None:
     if shutil.which("make") is None:
         pytest.skip("make is unavailable")
     (tmp_path / "Makefile").write_text(makefile, encoding="utf-8")
@@ -223,7 +223,7 @@ def test_real_make_structural_probe_accepts_init_without_recipe(tmp_path: Path, 
     assert result.command == ("make", "init")
 
 
-def test_real_make_structural_probe_preserves_special_makefile_path(tmp_path: Path) -> None:
+def test_real_make_direct_detection_preserves_special_makefile_path(tmp_path: Path) -> None:
     if shutil.which("make") is None:
         pytest.skip("make is unavailable")
     target = tmp_path / "repo $ # with space"
@@ -236,7 +236,7 @@ def test_real_make_structural_probe_preserves_special_makefile_path(tmp_path: Pa
     assert (target / "initialized").is_file()
 
 
-def test_real_make_diagnostic_target_spoof_does_not_create_bootstrap(tmp_path: Path) -> None:
+def test_real_make_diagnostic_target_spoof_is_detection_failure(tmp_path: Path) -> None:
     if shutil.which("make") is None:
         pytest.skip("make is unavailable")
     (tmp_path / "Makefile").write_text(
@@ -246,7 +246,7 @@ def test_real_make_diagnostic_target_spoof_does_not_create_bootstrap(tmp_path: P
 
     result = MakeCliGateway().run_make_init_if_available(tmp_path)
 
-    assert result.status == "skipped"
+    assert result.status == "detection_failed"
     assert not (tmp_path / "all-ran").exists()
 
 
@@ -262,6 +262,63 @@ def test_real_make_error_text_spoof_is_detection_failure(tmp_path: Path) -> None
 
     assert result.status == "detection_failed"
     assert result.command == ("make", "-n", "init")
+    assert result.exit_code != 0
+
+
+def test_real_make_no_init_static_proof_does_not_spawn_a_second_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "Makefile").write_text("all:\n\t@echo all\n", encoding="utf-8")
+    calls: list[tuple[tuple[str, ...], Path]] = []
+
+    def direct_only(argv: tuple[str, ...], cwd: Path) -> subprocess.CompletedProcess[str]:
+        calls.append((argv, cwd))
+        return _completed(2, stderr="No rule to make target 'init'.")
+
+    monkeypatch.setattr("worktree_provisioner.infra.make_cli.shutil.which", lambda _: "/usr/bin/make")
+    monkeypatch.setattr("worktree_provisioner.infra.make_cli._run_bounded_process", direct_only)
+
+    result = MakeCliGateway().run_make_init_if_available(tmp_path)
+
+    assert result.status == "skipped"
+    assert calls == [(("make", "-n", "init"), tmp_path)]
+
+
+@pytest.mark.parametrize("name", ["MAKEFLAGS", "MAKEOVERRIDES", "GNUMAKEFLAGS"])
+def test_real_make_static_absence_refuses_make_flag_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    if shutil.which("make") is None:
+        pytest.skip("make is unavailable")
+    (tmp_path / "Makefile").write_text("all:\n", encoding="utf-8")
+    monkeypatch.setenv(name, "--warn-undefined-variables")
+
+    result = MakeCliGateway().run_make_init_if_available(tmp_path)
+
+    assert result.status == "detection_failed"
+    assert result.exit_code != 0
+
+
+@pytest.mark.parametrize(
+    "makefile",
+    [
+        "MAKEFLAGS += --warn-undefined-variables\nall:\n",
+        "MAKEOVERRIDES := inherited\nall:\n",
+        "ifeq ($(origin MAKEFLAGS),environment)\ninit:\nendif\n",
+        "define make-init\ninit: missing-prerequisite\nendef\n$(eval $(make-init))\n",
+        "%: missing-prerequisite\n\t@echo pattern\n",
+        "all: \\\n  other\nother:\n",
+        "this is not a valid make statement\n",
+    ],
+)
+def test_real_make_dynamic_or_ambiguous_absence_is_detection_failure(tmp_path: Path, makefile: str) -> None:
+    if shutil.which("make") is None:
+        pytest.skip("make is unavailable")
+    (tmp_path / "Makefile").write_text(makefile, encoding="utf-8")
+
+    result = MakeCliGateway().run_make_init_if_available(tmp_path)
+
+    assert result.status == "detection_failed"
     assert result.exit_code != 0
 
 
@@ -349,7 +406,7 @@ def test_real_make_failing_repository_default_is_detection_failure(tmp_path: Pat
     assert result.exit_code != 0
 
 
-def test_real_make_structural_probe_preserves_custom_recipe_prefix(tmp_path: Path) -> None:
+def test_real_make_direct_detection_preserves_custom_recipe_prefix(tmp_path: Path) -> None:
     if shutil.which("make") is None:
         pytest.skip("make is unavailable")
     makefile = ".RECIPEPREFIX := >\ninit:\n>@touch initialized\n"
@@ -375,7 +432,7 @@ def test_real_make_structural_probe_preserves_custom_recipe_prefix(tmp_path: Pat
     assert (tmp_path / "initialized").is_file()
 
 
-def test_real_make_structural_probe_preserves_symlinked_makefile_identity(tmp_path: Path) -> None:
+def test_real_make_direct_detection_preserves_symlinked_makefile_identity(tmp_path: Path) -> None:
     if shutil.which("make") is None:
         pytest.skip("make is unavailable")
     real_makefile = tmp_path / "real.mk"
@@ -388,7 +445,7 @@ def test_real_make_structural_probe_preserves_symlinked_makefile_identity(tmp_pa
     assert (tmp_path / "initialized").is_file()
 
 
-def test_real_make_structural_probe_preserves_relative_makefile_list_include(tmp_path: Path) -> None:
+def test_real_make_direct_detection_preserves_relative_makefile_list_include(tmp_path: Path) -> None:
     if shutil.which("make") is None:
         pytest.skip("make is unavailable")
     config = tmp_path / "config"

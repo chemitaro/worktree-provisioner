@@ -9,12 +9,10 @@ from __future__ import annotations
 
 import os
 import re
-import secrets
 import selectors
 import shutil
 import subprocess
-import tempfile
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Final, Protocol, cast
@@ -25,7 +23,7 @@ _MAKE_COMMAND: Final[str] = "make"
 _DIAGNOSTIC_LIMIT: Final[int] = 4096
 _STREAM_CHUNK_SIZE: Final[int] = 8192
 _MAKEFILE_NAMES: Final[tuple[str, ...]] = ("GNUmakefile", "makefile", "Makefile")
-_MATCHER_LINE_LIMIT: Final[int] = 8192
+_STATIC_MAKEFILE_LIMIT: Final[int] = 1024 * 1024
 
 
 class MakeRunner(Protocol):
@@ -90,9 +88,9 @@ class MakeCliGateway:
         """Return the bootstrap state for one already-created worktree."""
 
         target = _validated_worktree_path(worktree_path)
-        # Keep the public detection command stable.  The concrete probe uses
-        # a temporary overlay and controlled markers rather than classifying
-        # arbitrary diagnostic text from the repository.
+        # Keep the public detection command stable.  A non-zero direct result
+        # is only downgraded to ``skipped`` when this repository file is
+        # statically obvious to contain no init target.
         detection_argv = (self.make_executable, "-n", "init")
         try:
             makefile = _find_standard_makefile(target)
@@ -117,7 +115,7 @@ class MakeCliGateway:
             )
 
         try:
-            detected, has_init_target = self._run_detection(detection_argv, target, makefile)
+            detected, has_init_target = self._run_detection(detection_argv, target)
         except OSError as exc:
             return BootstrapResult(
                 requested=True,
@@ -129,6 +127,8 @@ class MakeCliGateway:
 
         detection_detail = _diagnostic(detected.stdout, detected.stderr)
         if detected.returncode != 0:
+            if self.runner is None and _static_proves_init_absent(makefile):
+                return _skipped()
             return BootstrapResult(
                 requested=True,
                 status="detection_failed",
@@ -187,15 +187,12 @@ class MakeCliGateway:
             return _bounded_completed_process(completed)
         return _run_bounded_process(argv, cwd)
 
-    def _run_detection(
-        self, argv: tuple[str, ...], cwd: Path, makefile: Path
-    ) -> tuple[subprocess.CompletedProcess[str], bool]:
-        """Run target detection with a structural, repository-independent marker."""
+    def _run_detection(self, argv: tuple[str, ...], cwd: Path) -> tuple[subprocess.CompletedProcess[str], bool]:
+        """Run the sole dynamic detection command, ``make -n init``."""
 
         if self.runner is not None:
-            # Inspect the injected result before applying the public
-            # diagnostic bound so a long synthetic prelude cannot hide a
-            # structurally present target in tests.
+            # The injected runner is a test seam; production uses the direct
+            # process path below and the static proof after its failure.
             raw = self.runner(
                 list(argv),
                 cwd=cwd,
@@ -206,7 +203,7 @@ class MakeCliGateway:
             )
             has_init_target = _contains_make_target(raw.stdout if isinstance(raw.stdout, str) else "", "init")
             return _bounded_completed_process(raw), has_init_target
-        return _run_structural_probe(self.make_executable, cwd, makefile)
+        return _run_direct_detection(self.make_executable, cwd)
 
 
 MakeGateway = MakeCliGateway
@@ -326,146 +323,95 @@ def _bounded_completed_process(completed: subprocess.CompletedProcess[str]) -> s
     )
 
 
-def _run_structural_probe(
-    make_executable: str, cwd: Path, makefile: Path
-) -> tuple[subprocess.CompletedProcess[str], bool]:
-    """Prove an absent ``init`` from make's own parsed rule database.
+_UNSAFE_MAKE_DIRECTIVE = re.compile(
+    r"^(?:-?include|sinclude|if|ifdef|ifndef|ifeq|ifneq|else|endif|define|endef|"
+    r"override|export|unexport|private|vpath|load|unload|undefine)\b",
+    re.IGNORECASE,
+)
+_MAKE_ASSIGNMENT = re.compile(r"^(?P<name>[A-Za-z_][A-Za-z0-9_.-]*)\s*(?::=|\?=|\+=|!=|=)")
+_MAKE_AUTHORITY_VARIABLES = frozenset({"MAKEFLAGS", "MAKEOVERRIDES", "GNUMAKEFLAGS"})
 
-    The direct command remains the authority for success and failure.  Only
-    after a direct failure do we ask make for its C-locale database while
-    adding an independent phony goal.  The overlay never replaces
-    ``.DEFAULT`` or any repository rule, and the repository makefile is passed
-    by its original basename so relative includes and ``MAKEFILE_LIST`` keep
-    their normal identity.  A complete database with neither an explicit
-    ``init`` nor a repository ``.DEFAULT`` proves absence; all other failures
-    stay detection failures.
-    """
+
+def _run_direct_detection(make_executable: str, cwd: Path) -> tuple[subprocess.CompletedProcess[str], bool]:
+    """Run the sole dynamic target check without changing Make state."""
 
     direct = _run_bounded_process((make_executable, "-n", "init"), cwd)
-    if direct.returncode == 0:
-        return direct, True
+    return direct, direct.returncode == 0
 
-    token = secrets.token_hex(16)
-    probe_target = f"__worktree_provisioner_database_{token}"
-    overlay = f".PHONY: {probe_target}\n{probe_target}: ;\n"
 
-    def new_states() -> dict[str, bool]:
-        return {
-            "database_started": False,
-            "files_section": False,
-            "database_finished": False,
-            "not_target": False,
-            "probe_target_seen": False,
-            "explicit_init": False,
-            "explicit_default": False,
-        }
+def _static_proves_init_absent(makefile: Path) -> bool:
+    """Return true only for a plainly parseable file with no init rule.
 
-    def database_matcher(states: dict[str, bool], expected_target: str) -> Callable[[str], bool]:
-        def match(line: str) -> bool:
-            if line.startswith("# Make data base, printed on "):
-                states["database_started"] = True
-                return False
-            if not states["database_started"]:
-                return False
-            if line == "# Files":
-                states["files_section"] = True
-                states["not_target"] = False
-                return False
-            if line.startswith("# Finished Make data base"):
-                states["database_finished"] = True
-                states["files_section"] = False
-                states["not_target"] = False
-                return False
-            if not states["files_section"]:
-                return False
-            if line == "# Not a target:":
-                states["not_target"] = True
-                return False
-            if line.startswith(f"{expected_target}:"):
-                states["probe_target_seen"] = states["probe_target_seen"] or not states["not_target"]
-                states["not_target"] = False
-                return False
-            if line.startswith("init:"):
-                states["explicit_init"] = states["explicit_init"] or not states["not_target"]
-                states["not_target"] = False
-                return False
-            if line == ".DEFAULT:":
-                states["explicit_default"] = states["explicit_default"] or not states["not_target"]
-                states["not_target"] = False
-                return False
-            if line.strip():
-                states["not_target"] = False
+    This is intentionally a narrow source scan, not a Make parser.  Any
+    construct that can change the rule graph or make interpretation causes a
+    conservative detection failure instead of a false ``skipped`` result.
+    """
+
+    if any(name in os.environ for name in ("MAKEFLAGS", "MAKEOVERRIDES", "GNUMAKEFLAGS")):
+        return False
+    try:
+        with makefile.open("rb") as stream:
+            source = stream.read(_STATIC_MAKEFILE_LIMIT + 1)
+    except OSError:
+        return False
+    if len(source) > _STATIC_MAKEFILE_LIMIT or b"\0" in source:
+        return False
+    try:
+        text = source.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    if "\ufeff" in text:
+        return False
+
+    for raw_line in text.splitlines():
+        line = raw_line.rstrip("\r")
+        if _has_line_continuation(line):
             return False
-
-        return match
-
-    def database_is_complete(states: dict[str, bool]) -> bool:
-        return (
-            states["database_started"]
-            and not states["files_section"]
-            and states["database_finished"]
-            and states["probe_target_seen"]
-        )
-
-    def run_database_probe(overlay_path: Path, states: dict[str, bool]) -> subprocess.CompletedProcess[str]:
-        completed, _ = _run_bounded_process_with_matcher(
-            (
-                make_executable,
-                "-np",
-                "-k",
-                "-f",
-                makefile.name,
-                "-f",
-                str(overlay_path),
-                # The harmless probe goal avoids resolving ``init`` while
-                # this assignment preserves Makefiles that condition rules
-                # on the direct command's MAKECMDGOALS value.
-                "MAKECMDGOALS=init",
-                probe_target,
-            ),
-            cwd,
-            database_matcher(states, probe_target),
-            env=_make_probe_environment(),
-        )
-        return completed
-
-    with tempfile.TemporaryDirectory(prefix="worktree-provisioner-make-") as directory:
-        overlay_path = Path(directory) / "Makefile"
-        overlay_path.write_text(overlay, encoding="utf-8")
-        states = new_states()
-        completed = run_database_probe(overlay_path, states)
-    if completed.returncode == 0 and database_is_complete(states):
-        if states["explicit_init"] or states["explicit_default"]:
-            return direct, False
-        return subprocess.CompletedProcess(
-            completed.args,
-            0,
-            stdout="",
-            stderr="",
-        ), False
-    return direct, False
+        if line.startswith("\t"):
+            if "$" in line or any(name in line for name in _MAKE_AUTHORITY_VARIABLES | {"origin"}):
+                return False
+            continue
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        # Inline comments cannot be parsed safely without reproducing Make's
+        # escaping rules; ignoring their tail keeps this proof conservative.
+        semantic = line.split("#", 1)[0].strip()
+        if not semantic:
+            continue
+        if "$" in semantic or "%" in semantic:
+            return False
+        if _UNSAFE_MAKE_DIRECTIVE.match(semantic):
+            return False
+        assignment = _MAKE_ASSIGNMENT.match(semantic)
+        if assignment is not None:
+            if assignment.group("name") in _MAKE_AUTHORITY_VARIABLES:
+                return False
+            continue
+        colon = semantic.find(":")
+        if colon < 1:
+            return False
+        left = semantic[:colon].strip()
+        if not left or "\\" in left:
+            return False
+        if left == ".PHONY":
+            if "init" in semantic[colon + 1 :].split():
+                return False
+            continue
+        if left.startswith("."):
+            return False
+        if "init" in left.split():
+            return False
+    return True
 
 
-def _make_probe_environment() -> dict[str, str]:
-    environment = dict(os.environ)
-    environment["LC_ALL"] = "C"
-    return environment
+def _has_line_continuation(line: str) -> bool:
+    candidate = line.rstrip()
+    trailing_backslashes = len(candidate) - len(candidate.rstrip("\\"))
+    return trailing_backslashes % 2 == 1
 
 
-def _run_bounded_process(
-    argv: tuple[str, ...], cwd: Path, *, env: dict[str, str] | None = None
-) -> subprocess.CompletedProcess[str]:
-    completed, _ = _run_bounded_process_with_matcher(argv, cwd, None, env=env)
-    return completed
-
-
-def _run_bounded_process_with_matcher(
-    argv: tuple[str, ...],
-    cwd: Path,
-    matcher: Callable[[str], bool] | None,
-    *,
-    env: dict[str, str] | None = None,
-) -> tuple[subprocess.CompletedProcess[str], bool]:
+def _run_bounded_process(argv: tuple[str, ...], cwd: Path) -> subprocess.CompletedProcess[str]:
     """Run a command while draining both pipes and retaining only a prefix.
 
     ``subprocess.run(capture_output=True)`` must not be used here: it retains
@@ -480,14 +426,11 @@ def _run_bounded_process_with_matcher(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         shell=False,
-        env=env,
     )
     assert process.stdout is not None and process.stderr is not None
     stdout_fd = process.stdout.fileno()
     stderr_fd = process.stderr.fileno()
     streams: dict[int, bytearray] = {stdout_fd: bytearray(), stderr_fd: bytearray()}
-    matcher_buffer = ""
-    matcher_found = False
     selector = selectors.DefaultSelector()
     selector.register(process.stdout, selectors.EVENT_READ)
     selector.register(process.stderr, selectors.EVENT_READ)
@@ -500,17 +443,6 @@ def _run_bounded_process_with_matcher(
                     selector.unregister(stream)
                     stream.close()
                     continue
-                if matcher is not None and stream.fileno() == stdout_fd and not matcher_found:
-                    matcher_buffer += chunk.decode("utf-8", errors="replace")
-                    while "\n" in matcher_buffer:
-                        line, matcher_buffer = matcher_buffer.split("\n", 1)
-                        if matcher(line.rstrip("\r")):
-                            matcher_found = True
-                            break
-                    if not matcher_found and len(matcher_buffer) > _MATCHER_LINE_LIMIT:
-                        # A malformed/no-newline line must not turn the
-                        # structural probe into an unbounded accumulator.
-                        matcher_buffer = matcher_buffer[-_MATCHER_LINE_LIMIT:]
                 retained = streams[stream.fileno()]
                 if len(retained) < _DIAGNOSTIC_LIMIT:
                     retained.extend(chunk[: _DIAGNOSTIC_LIMIT - len(retained)])
@@ -526,23 +458,18 @@ def _run_bounded_process_with_matcher(
             if not pipe.closed:
                 pipe.close()
 
-    if matcher is not None and not matcher_found and matcher_buffer and matcher(matcher_buffer.rstrip("\r")):
-        matcher_found = True
-
     return subprocess.CompletedProcess(
         list(argv),
         returncode,
         stdout=bytes(streams[stdout_fd]).decode("utf-8", errors="replace"),
         stderr=bytes(streams[stderr_fd]).decode("utf-8", errors="replace"),
-    ), matcher_found
-
-
-def _is_make_target_line(line: str, target: str) -> bool:
-    return line.startswith(f"{target}:")
+    )
 
 
 def _contains_make_target(output: str, target: str) -> bool:
-    return any(_is_make_target_line(line, target) for line in output.splitlines())
+    """Recognize the explicit synthetic output used by the runner seam."""
+
+    return any(line.startswith(f"{target}:") for line in output.splitlines())
 
 
 __all__ = [

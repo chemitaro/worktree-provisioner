@@ -23,6 +23,37 @@ _GIT_COMMAND: Final[str] = "git"
 _DIAGNOSTIC_LIMIT: Final[int] = 4096
 _HEAD = "HEAD"
 _BRANCH_REF_PREFIX = "refs/heads/"
+_GIT_AUTHORITY_ENVIRONMENT = frozenset(
+    {
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_COMMON_DIR",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_INDEX_FILE",
+        "GIT_GRAFT_FILE",
+        "GIT_SHALLOW_FILE",
+        "GIT_NAMESPACE",
+        "GIT_PREFIX",
+        "GIT_INTERNAL_SUPER_PREFIX",
+        "GIT_IMPLICIT_WORK_TREE",
+        "GIT_CEILING_DIRECTORIES",
+        "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+        "GIT_NO_REPLACE_OBJECTS",
+        "GIT_REPLACE_REF_BASE",
+        "GIT_QUARANTINE_PATH",
+        "GIT_CONFIG",
+        "GIT_CONFIG_SYSTEM",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_XDG",
+        "GIT_CONFIG_NOSYSTEM",
+        "GIT_CONFIG_DISABLE",
+        "GIT_CONFIG_ENVIRONMENT",
+        "GIT_CONFIG_EXTENSIONS",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_CONFIG_COUNT",
+    }
+)
 
 
 class GitAdapterError(RuntimeError):
@@ -514,11 +545,15 @@ def _classify_add_collision(
 
 
 def _git_environment() -> dict[str, str]:
-    """Make Git's diagnostics deterministic without dropping user settings."""
+    """Make Git deterministic without inheriting repository authority."""
 
-    environment = dict(os.environ)
+    environment = {key: value for key, value in os.environ.items() if not _is_git_authority_environment(key)}
     environment["LC_ALL"] = "C"
     return environment
+
+
+def _is_git_authority_environment(key: str) -> bool:
+    return key in _GIT_AUTHORITY_ENVIRONMENT or key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))
 
 
 def _diagnostic(stdout: str | None, stderr: str | None) -> str:
