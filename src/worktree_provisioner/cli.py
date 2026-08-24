@@ -1,23 +1,22 @@
-"""Command-line composition root for the worktree lifecycle commands."""
+"""Command-line composition root for the four worktree operations."""
 
 from __future__ import annotations
 
 import argparse
-import json
 import sys
-from dataclasses import asdict, is_dataclass
+from collections.abc import Sequence
 from pathlib import Path
+from typing import Any, Final, NoReturn, cast
 
 from worktree_provisioner import __version__
 from worktree_provisioner.application.contracts import (
-    ArtifactState,
-    BootstrapResult,
     CreateRequest,
     CreateResult,
     ErrorCode,
     ExpectedError,
     ListRequest,
     ListResult,
+    Operation,
     RemoveRequest,
     RemoveResult,
     ShowRequest,
@@ -30,12 +29,57 @@ from worktree_provisioner.infra.environment import EnvironmentAdapter
 from worktree_provisioner.infra.filesystem import FilesystemCliGateway
 from worktree_provisioner.infra.git_cli import GitCliGateway
 from worktree_provisioner.infra.make_cli import MakeCliGateway
+from worktree_provisioner.presentation import json_v1, text
+
+_COMMANDS: Final[tuple[str, ...]] = ("create", "list", "show", "remove")
+_RESULT = CreateResult | ListResult | ShowResult | RemoveResult
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="worktree-provisioner")
+class _UsageParseError(ValueError):
+    pass
+
+
+class _ParserExit(SystemExit):
+    def __init__(self, status: int) -> None:
+        self.status = status
+        super().__init__(status)
+
+
+class _ArgumentParser(argparse.ArgumentParser):
+    """Argparse boundary that lets ``main`` render JSON usage errors."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+
+    def error(self, message: str) -> NoReturn:
+        raise _UsageParseError(message)
+
+    def exit(self, status: int = 0, message: str | None = None) -> NoReturn:
+        if message:
+            print(message, file=sys.stderr, end="")
+        raise _ParserExit(status)
+
+
+def build_parser(
+    raw_argv: Sequence[str] | None = None,
+    *,
+    json_mode: bool | None = None,
+) -> argparse.ArgumentParser:
+    # ``raw_argv`` is accepted for callers following the design document's
+    # composition-root shape.  The parser itself only needs the flag at the
+    # main boundary, where parse failures can be rendered as JSON.
+    del raw_argv, json_mode
+    parser = _ArgumentParser(prog="worktree-provisioner")
     parser.add_argument("--version", action="version", version=__version__)
-    subcommands = parser.add_subparsers(dest="command", required=True)
+    # Accepting --json before the command is harmless and makes the explicit
+    # machine-mode promise unambiguous for agent callers.  The canonical
+    # command-local spelling is also installed below.
+    parser.add_argument("--json", action="store_true", dest="_global_json", help=argparse.SUPPRESS)
+    subcommands = parser.add_subparsers(
+        dest="command",
+        required=True,
+        parser_class=_ArgumentParser,
+    )
 
     create = subcommands.add_parser("create", help="Create a central-root Git linked worktree")
     create.add_argument("label", nargs="?", help="Optional lowercase label: letters, digits, and hyphens")
@@ -63,22 +107,36 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    explicit_json = "--json" in raw_argv
+    parser = build_parser(json_mode=explicit_json)
+    try:
+        args = parser.parse_args(raw_argv)
+    except _ParserExit as exc:
+        return exc.status
+    except _UsageParseError as exc:
+        if explicit_json:
+            print(json_v1.dumps(json_v1.usage_error_document(str(exc), operation=_infer_operation(raw_argv))))
+        else:
+            parser.print_usage(file=sys.stderr)
+            print(f"worktree-provisioner: error: {exc}", file=sys.stderr)
+        return 2
 
+    json_mode = bool(getattr(args, "_global_json", False) or getattr(args, "json", False))
+    operation = _operation_from_argument(getattr(args, "command", None))
     ports = ApplicationPorts(
         git=GitCliGateway(),
         bootstrap=MakeCliGateway(),
         filesystem=FilesystemCliGateway(),
         environment=EnvironmentAdapter(),
     )
-    json_mode = bool(args.json)
     try:
         try:
             repo_root = ports.git.resolve_checkout_root(args.repo)
         except Exception as exc:
             raise ExpectedError(
                 code=_repository_error_code(exc),
-                operation=args.command,
+                operation=operation,
                 message="failed to resolve the invocation repository",
                 details={"diagnostic": _bounded(str(exc))},
                 result=None,
@@ -88,217 +146,104 @@ def main(argv: list[str] | None = None) -> int:
             root = select_root(args.root, ports.environment)
         except RootResolutionError as exc:
             raise ExpectedError(
-                code=exc.code,  # type: ignore[arg-type]
-                operation=args.command,
+                code=cast(ErrorCode, exc.code),
+                operation=operation,
                 message=str(exc),
                 details=exc.details,
                 result=None,
                 status="error",
             ) from exc
+
         service = WorktreeService(ports)
-        if args.command == "create":
-            result: CreateResult | ListResult | ShowResult | RemoveResult = service.create(
-                CreateRequest(
-                    repo_root=repo_root,
-                    root=root,
-                    label=args.label,
-                    bootstrap_enabled=not args.no_bootstrap,
-                )
-            )
-        elif args.command == "list":
-            result = service.list(ListRequest(repo_root=repo_root, root=root))
-        elif args.command == "show":
-            result = service.show(ShowRequest(repo_root=repo_root, root=root, target=args.target))
-        else:
-            result = service.remove(
-                RemoveRequest(
-                    repo_root=repo_root,
-                    root=root,
-                    target=args.target,
-                    force=args.force,
-                )
-            )
+        result = _dispatch(service, args, repo_root, root, operation)
     except ExpectedError as exc:
         return _emit_error(exc, json_mode=json_mode)
     except Exception as exc:
         internal = ExpectedError(
             code="internal_error",
-            operation=args.command,
+            operation=operation,
             message="unexpected internal error",
-            details={"diagnostic": _bounded(str(exc))},
+            details={"exception_type": type(exc).__name__},
             result=None,
             status="error",
         )
+        # Preserve the original cause for in-process diagnostics without
+        # serializing its message or traceback to either user-facing stream.
+        internal.__cause__ = exc
         return _emit_error(internal, json_mode=json_mode)
 
     _emit_success(result, json_mode=json_mode)
     return 0
 
 
-def _emit_success(result: CreateResult | ListResult | ShowResult | RemoveResult, *, json_mode: bool) -> None:
-    if json_mode:
-        print(
-            json.dumps(
-                {
-                    "schema_version": 1,
-                    "status": "ok",
-                    "operation": _result_operation(result),
-                    "result": _result_payload(result),
-                    "error": None,
-                    "warnings": [],
-                },
-                ensure_ascii=False,
+def _dispatch(
+    service: WorktreeService,
+    args: argparse.Namespace,
+    repo_root: Path,
+    root: Path,
+    operation: Operation,
+) -> _RESULT:
+    if operation == "create":
+        return service.create(
+            CreateRequest(
+                repo_root=repo_root,
+                root=root,
+                label=args.label,
+                bootstrap_enabled=not args.no_bootstrap,
             )
         )
-        return
-    if isinstance(result, CreateResult):
-        print(f"worktree-provisioner: ok (create) id={result.id} branch={result.branch} path={result.worktree_path}")
-        command = " ".join(result.bootstrap.command) if result.bootstrap.command else "-"
-        exit_code = "" if result.bootstrap.exit_code is None else f" exit_code={result.bootstrap.exit_code}"
-        print(f"worktree-provisioner: bootstrap status={result.bootstrap.status} command={command}{exit_code}")
-    elif isinstance(result, ListResult):
-        print(f"worktree-provisioner: ok (list) count={len(result.worktrees)}")
-        for worktree in result.worktrees:
-            branch = worktree.branch or "-"
-            print(f"{worktree.id}\t{branch}\t{worktree.path}")
-    elif isinstance(result, ShowResult):
-        print(
-            "worktree-provisioner: ok (show) "
-            f"id={result.worktree.id} branch={result.worktree.branch or '-'} path={result.worktree.path}"
-        )
+    if operation == "list":
+        return service.list(ListRequest(repo_root=repo_root, root=root))
+    if operation == "show":
+        return service.show(ShowRequest(repo_root=repo_root, root=root, target=args.target))
+    return service.remove(RemoveRequest(repo_root=repo_root, root=root, target=args.target, force=args.force))
+
+
+def _emit_success(result: _RESULT, *, json_mode: bool) -> None:
+    if json_mode:
+        print(json_v1.dumps(json_v1.success_document(result)))
     else:
-        print(
-            "worktree-provisioner: ok (remove) "
-            f"target={result.target} path={result.resolved_target.path} "
-            f"removed_record={result.removed_record} removed_directory={result.removed_directory}"
-        )
+        print(text.render_success(result))
 
 
 def _emit_error(error: ExpectedError, *, json_mode: bool) -> int:
     if json_mode:
-        print(
-            json.dumps(
-                {
-                    "schema_version": 1,
-                    "status": error.status,
-                    "operation": error.operation,
-                    "result": _result_payload(error.result),
-                    "error": {
-                        "code": error.code,
-                        "message": error.message,
-                        "details": _json_safe(error.details),
-                    },
-                    "warnings": [],
-                },
-                ensure_ascii=False,
-            )
-        )
+        print(json_v1.dumps(json_v1.error_document(error)))
     else:
-        if isinstance(error.result, CreateResult):
-            result = error.result
-            print(
-                "worktree-provisioner: partial (create) "
-                f"id={result.id} branch={result.branch} path={result.worktree_path}"
-            )
-            command = " ".join(result.bootstrap.command) if result.bootstrap.command else "-"
-            exit_code = "" if result.bootstrap.exit_code is None else f" exit_code={result.bootstrap.exit_code}"
-            print(f"worktree-provisioner: bootstrap status={result.bootstrap.status} command={command}{exit_code}")
-        elif isinstance(error.result, RemoveResult):
-            remove_result = error.result
-            print(
-                "worktree-provisioner: partial (remove) "
-                f"target={remove_result.target} path={remove_result.resolved_target.path} "
-                f"removed_record={remove_result.removed_record} "
-                f"removed_directory={remove_result.removed_directory}"
-            )
-        print(f"worktree-provisioner: error: {error.message}", file=sys.stderr)
+        stdout, stderr = text.render_error(error)
+        if stdout:
+            print(stdout)
+        print(stderr, file=sys.stderr)
     return 1
 
 
-def _create_payload(result: CreateResult) -> dict[str, object]:
-    return {
-        "id": result.id,
-        "main_worktree_path": str(result.main_worktree_path),
-        "container_path": str(result.container_path),
-        "worktree_path": str(result.worktree_path),
-        "branch": result.branch,
-        "bootstrap": _bootstrap_payload(result.bootstrap),
-        "artifacts": _artifact_payload(result.artifacts),
-    }
+def _operation_from_argument(value: object) -> Operation:
+    if value in _COMMANDS:
+        return cast(Operation, value)
+    return "create"
 
 
-def _list_payload(result: ListResult) -> dict[str, object]:
-    return {"worktrees": [_json_safe(worktree) for worktree in result.worktrees]}
+def _infer_operation(argv: Sequence[str]) -> str | None:
+    for item in argv:
+        if item in _COMMANDS:
+            return item
+    return None
 
 
-def _show_payload(result: ShowResult) -> dict[str, object]:
-    return {"target": result.target, "worktree": _json_safe(result.worktree)}
-
-
-def _result_payload(result: object | None) -> object | None:
-    if isinstance(result, CreateResult):
-        return _create_payload(result)
-    if isinstance(result, ListResult):
-        return _list_payload(result)
-    if isinstance(result, ShowResult):
-        return _show_payload(result)
-    if isinstance(result, RemoveResult):
-        return _remove_payload(result)
-    return _json_safe(result)
-
-
-def _result_operation(result: CreateResult | ListResult | ShowResult | RemoveResult) -> str:
-    if isinstance(result, CreateResult):
-        return "create"
-    if isinstance(result, ListResult):
-        return "list"
-    if isinstance(result, ShowResult):
-        return "show"
-    return "remove"
-
-
-def _remove_payload(result: RemoveResult) -> dict[str, object]:
-    return {
-        "target": result.target,
-        "resolved_target": _json_safe(result.resolved_target),
-        "force_requested": result.force_requested,
-        "removed_record": result.removed_record,
-        "removed_directory": result.removed_directory,
-        "branch_deleted": result.branch_deleted,
-    }
-
-
-def _bootstrap_payload(result: BootstrapResult) -> dict[str, object]:
-    return {
-        "requested": result.requested,
-        "status": result.status,
-        "command": list(result.command) if result.command is not None else None,
-        "exit_code": result.exit_code,
-        "detail": result.detail,
-    }
-
-
-def _artifact_payload(result: ArtifactState) -> dict[str, bool | None]:
-    return {
-        "container_exists": result.container_exists,
-        "worktree_path_exists": result.worktree_path_exists,
-        "branch_exists": result.branch_exists,
-        "worktree_record_exists": result.worktree_record_exists,
-    }
-
-
-def _json_safe(value: object) -> object:
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, (tuple, list)):
-        return [_json_safe(item) for item in value]
-    if isinstance(value, dict):
-        return {str(key): _json_safe(item) for key, item in value.items()}
-    if is_dataclass(value):
-        return _json_safe(asdict(value))  # type: ignore[arg-type]
-    return str(value)
+def _repository_error_code(error: BaseException) -> ErrorCode:
+    diagnostic = " ".join(
+        part
+        for part in (
+            str(error),
+            str(getattr(error, "diagnostic", "")),
+        )
+        if part
+    ).lower()
+    if "bare repository" in diagnostic or "must be run in a work tree" in diagnostic:
+        return "bare_repository_unsupported"
+    if "not found" in diagnostic or "executable" in diagnostic or "start git" in diagnostic:
+        return "git_unavailable"
+    return "repository_unavailable"
 
 
 def _bounded(value: str, limit: int = 4096) -> str:
@@ -307,13 +252,6 @@ def _bounded(value: str, limit: int = 4096) -> str:
     if limit <= 1:
         return value[:limit]
     return f"{value[: limit - 1]}…"
-
-
-def _repository_error_code(error: BaseException) -> ErrorCode:
-    text = str(error).lower()
-    if "not found" in text or "executable" in text or "start git" in text:
-        return "git_unavailable"
-    return "repository_unavailable"
 
 
 __all__ = ["build_parser", "main"]

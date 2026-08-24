@@ -39,19 +39,18 @@ def test_list_exposes_managed_and_external_records(
     assert "outside_managed_namespace" in by_path[str(external)]["remove_blockers"]
 
 
-def test_show_reports_ambiguous_basename_with_candidates(
+def test_show_prefers_exact_stable_id_before_basename_ambiguity(
     temp_git_repo: TempGitRepository, central_root: Path, tmp_path: Path, cli_runner, json_loads
 ) -> None:
     first = _add_worktree(temp_git_repo, tmp_path / "left" / "same-name", "left-target")
-    second = _add_worktree(temp_git_repo, tmp_path / "right" / "same-name", "right-target")
+    _add_worktree(temp_git_repo, tmp_path / "right" / "same-name", "right-target")
     result = cli_runner("show", "same-name", "--json", repo=temp_git_repo.path, root=central_root)
     payload = _payload(result, json_loads)
 
-    assert result.returncode == 1
-    assert payload["status"] == "error"
-    assert payload["error"]["code"] == "ambiguous_target"
-    candidates = payload["error"]["details"]["candidates"]
-    assert {candidate["path"] for candidate in candidates} == {str(first), str(second)}
+    assert result.returncode == 0, result.stderr
+    assert payload["status"] == "ok"
+    assert payload["result"]["worktree"]["id"] == "same-name"
+    assert payload["result"]["worktree"]["path"] == str(first)
 
 
 def test_external_remove_is_blocked_without_git_mutation(
