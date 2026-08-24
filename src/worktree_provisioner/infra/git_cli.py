@@ -258,9 +258,23 @@ class GitCliGateway:
                 argv=(),
                 message="worktree namespace capability is invalid",
             )
+        within_root = getattr(directory, "is_within_bound_root", None)
+        if callable(within_root) and not within_root():
+            raise GitAdapterError(
+                operation="add_worktree_bound",
+                argv=(),
+                message="worktree namespace is outside the managed root",
+            )
         target_name = _validated_relative_name(name)
         branch_name = _validated_branch(branch)
         common_git_dir = self._common_git_dir(repo)
+        start_point = self._head_commit(repo)
+        if callable(within_root) and not within_root():
+            raise GitAdapterError(
+                operation="add_worktree_bound",
+                argv=(),
+                message="worktree namespace is outside the managed root",
+            )
         args = (
             "--git-dir",
             str(common_git_dir),
@@ -269,6 +283,7 @@ class GitCliGateway:
             "-b",
             branch_name,
             target_name,
+            start_point,
         )
         completed = self._run(
             repo,
@@ -300,6 +315,33 @@ class GitCliGateway:
             collision_kind=_classify_add_collision(diagnostic, branch=branch_name, path=target),
         )
 
+    def _head_commit(self, repo_root: Path) -> str:
+        """Return the invocation checkout HEAD for an explicit add start point."""
+
+        completed = self._run(
+            repo_root,
+            ("rev-parse", "--verify", "HEAD"),
+            operation="resolve_head",
+            text=False,
+        )
+        raw = _remove_stdout_delimiter(completed.stdout)
+        if not raw:
+            raise GitAdapterError(
+                operation="resolve_head",
+                argv=self._argv(("rev-parse", "--verify", "HEAD")),
+                message="git returned an empty HEAD",
+                returncode=completed.returncode,
+            )
+        value = os.fsdecode(raw) if isinstance(raw, bytes) else raw
+        if not value or any(character in value for character in "\r\n\x00"):
+            raise GitAdapterError(
+                operation="resolve_head",
+                argv=self._argv(("rev-parse", "--verify", "HEAD")),
+                message="git returned an invalid HEAD",
+                returncode=completed.returncode,
+            )
+        return value
+
     def _common_git_dir(self, repo_root: Path) -> Path:
         """Resolve Git's shared administrative directory before fd binding."""
 
@@ -327,6 +369,42 @@ class GitCliGateway:
         target = _validated_path(path, name="worktree path", require_exists=False)
         args = ("worktree", "remove", "--force", str(target)) if force else ("worktree", "remove", str(target))
         self._run(repo, args, operation="remove_worktree")
+
+    def remove_worktree_bound(self, repo_root: Path, *, directory: object, name: str, force: bool) -> None:
+        """Remove a worktree using a root-bound namespace directory fd."""
+
+        repo = _validated_path(repo_root, name="repository root")
+        fd = getattr(directory, "fd", None)
+        if not isinstance(fd, int) or fd < 0:
+            raise GitAdapterError(
+                operation="remove_worktree_bound",
+                argv=(),
+                message="worktree namespace capability is invalid",
+            )
+        within_root = getattr(directory, "is_within_bound_root", None)
+        if callable(within_root) and not within_root():
+            raise GitAdapterError(
+                operation="remove_worktree_bound",
+                argv=(),
+                message="worktree namespace is outside the managed root",
+            )
+        target_name = _validated_relative_name(name)
+        common_git_dir = self._common_git_dir(repo)
+        if callable(within_root) and not within_root():
+            raise GitAdapterError(
+                operation="remove_worktree_bound",
+                argv=(),
+                message="worktree namespace is outside the managed root",
+            )
+        args = (
+            "--git-dir",
+            str(common_git_dir),
+            "worktree",
+            "remove",
+            *(("--force",) if force else ()),
+            target_name,
+        )
+        self._run(repo, args, operation="remove_worktree_bound", cwd_fd=fd)
 
     def _argv(self, args: Sequence[str]) -> tuple[str, ...]:
         return (self.git_executable, *args)
@@ -373,29 +451,58 @@ class GitCliGateway:
                 message="git executable was not found",
             )
 
+        completed: subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]
         try:
             if cwd_fd is None:
-                completed = subprocess.run(
-                    list(argv),
-                    cwd=repo_root,
-                    capture_output=True,
-                    text=text,
-                    check=False,
-                    shell=False,
-                    env=_git_environment(),
-                )
+                if text:
+                    completed = subprocess.run(
+                        list(argv),
+                        cwd=repo_root,
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="surrogateescape",
+                        check=False,
+                        shell=False,
+                        env=_git_environment(),
+                    )
+                else:
+                    completed = subprocess.run(
+                        list(argv),
+                        cwd=repo_root,
+                        capture_output=True,
+                        text=False,
+                        check=False,
+                        shell=False,
+                        env=_git_environment(),
+                    )
             else:
-                completed = subprocess.run(
-                    list(argv),
-                    cwd=repo_root,
-                    capture_output=True,
-                    text=text,
-                    check=False,
-                    shell=False,
-                    env=_git_environment(),
-                    pass_fds=(cwd_fd,),
-                    preexec_fn=lambda: os.fchdir(cwd_fd),
-                )
+                if text:
+                    completed = subprocess.run(
+                        list(argv),
+                        cwd=repo_root,
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="surrogateescape",
+                        check=False,
+                        shell=False,
+                        env=_git_environment(),
+                        pass_fds=(cwd_fd,),
+                        preexec_fn=lambda: os.fchdir(cwd_fd),
+                    )
+                else:
+                    completed = subprocess.run(
+                        list(argv),
+                        cwd=repo_root,
+                        capture_output=True,
+                        text=False,
+                        check=False,
+                        shell=False,
+                        env=_git_environment(),
+                        pass_fds=(cwd_fd,),
+                        preexec_fn=lambda: os.fchdir(cwd_fd),
+                    )
         except OSError as exc:
             raise GitAdapterError(
                 operation=operation,

@@ -202,6 +202,9 @@ def test_git_gateway_uses_exact_argv_and_preserves_paths(tmp_path: Path, monkeyp
     ]
     assert all(kwargs["shell"] is False for _, kwargs in calls)
     assert all(kwargs["cwd"] == repo for _, kwargs in calls)
+    text_calls = [kwargs for argv, kwargs in calls if kwargs["text"] is True]
+    assert all(kwargs["encoding"] == "utf-8" for kwargs in text_calls)
+    assert all(kwargs["errors"] == "surrogateescape" for kwargs in text_calls)
 
 
 def test_resolve_checkout_root_preserves_trailing_space_and_checks_identity(

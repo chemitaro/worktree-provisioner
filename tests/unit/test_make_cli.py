@@ -223,6 +223,57 @@ def test_real_make_direct_detection_accepts_init_without_recipe(tmp_path: Path, 
     assert result.command == ("make", "init")
 
 
+def test_real_make_phony_init_is_present_and_executes(tmp_path: Path) -> None:
+    if shutil.which("make") is None:
+        pytest.skip("make is unavailable")
+    (tmp_path / "Makefile").write_text(".PHONY: init\ninit:\n\t@touch initialized\n", encoding="utf-8")
+
+    result = MakeCliGateway().run_make_init_if_available(tmp_path)
+
+    assert result.status == "succeeded"
+    assert (tmp_path / "initialized").is_file()
+
+
+@pytest.mark.parametrize("kind", ["file", "directory"])
+def test_real_make_existing_init_path_without_rule_is_skipped(tmp_path: Path, kind: str) -> None:
+    if shutil.which("make") is None:
+        pytest.skip("make is unavailable")
+    (tmp_path / "Makefile").write_text("all:\n", encoding="utf-8")
+    init_path = tmp_path / "init"
+    if kind == "file":
+        init_path.write_text("existing\n", encoding="utf-8")
+    else:
+        init_path.mkdir()
+
+    result = MakeCliGateway().run_make_init_if_available(tmp_path)
+
+    assert result.status == "skipped"
+    assert result.command is None
+    assert init_path.exists()
+
+
+def test_real_make_global_assignment_after_rule_without_init_is_skipped(tmp_path: Path) -> None:
+    if shutil.which("make") is None:
+        pytest.skip("make is unavailable")
+    (tmp_path / "Makefile").write_text("all:\nVAR = value\n", encoding="utf-8")
+
+    result = MakeCliGateway().run_make_init_if_available(tmp_path)
+
+    assert result.status == "skipped"
+    assert result.command is None
+
+
+def test_real_make_default_rule_without_init_is_detection_failure(tmp_path: Path) -> None:
+    if shutil.which("make") is None:
+        pytest.skip("make is unavailable")
+    (tmp_path / "Makefile").write_text(".DEFAULT:\n\t@echo default\n", encoding="utf-8")
+
+    result = MakeCliGateway().run_make_init_if_available(tmp_path)
+
+    assert result.status == "detection_failed"
+    assert result.exit_code == 0
+
+
 def test_real_make_direct_detection_preserves_special_makefile_path(tmp_path: Path) -> None:
     if shutil.which("make") is None:
         pytest.skip("make is unavailable")
@@ -516,6 +567,23 @@ def test_real_make_direct_detection_preserves_symlinked_makefile_identity(tmp_pa
 
     assert result.status == "succeeded"
     assert (tmp_path / "initialized").is_file()
+
+
+def test_real_make_symlinked_makefile_preserves_cwd_relative_include(tmp_path: Path) -> None:
+    if shutil.which("make") is None:
+        pytest.skip("make is unavailable")
+    real_directory = tmp_path / "real"
+    worktree = tmp_path / "worktree"
+    real_directory.mkdir()
+    worktree.mkdir()
+    (real_directory / "Makefile").write_text("include commands.mk\n", encoding="utf-8")
+    (worktree / "Makefile").symlink_to(real_directory / "Makefile")
+    (worktree / "commands.mk").write_text("init:\n\t@touch initialized\n", encoding="utf-8")
+
+    result = MakeCliGateway().run_make_init_if_available(worktree)
+
+    assert result.status == "succeeded"
+    assert (worktree / "initialized").is_file()
 
 
 def test_real_make_direct_detection_preserves_relative_makefile_list_include(tmp_path: Path) -> None:

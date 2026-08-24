@@ -3,9 +3,10 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+import pytest
 from conftest import TempGitRepository  # type: ignore[import-not-found]
 
-from worktree_provisioner.application.contracts import CreateRequest, ExpectedError
+from worktree_provisioner.application.contracts import CreateRequest, ExpectedError, RemoveRequest
 from worktree_provisioner.application.ports import ApplicationPorts
 from worktree_provisioner.application.worktree_service import WorktreeService
 from worktree_provisioner.infra.environment import EnvironmentAdapter
@@ -156,6 +157,205 @@ def test_create_namespace_swap_to_external_symlink_never_creates_outside(
     assert (moved_namespace / f"{temp_git_repo.path.name}-race").is_dir()
 
 
+def test_create_namespace_swap_outside_root_is_rejected_before_git(
+    temp_git_repo: TempGitRepository, central_root: Path, monkeypatch
+) -> None:
+    original_add = GitCliGateway.add_worktree_bound
+    namespace = central_root / temp_git_repo.path.name
+    moved_namespace = central_root.parent / f"{temp_git_repo.path.name}-outside"
+    external = central_root.parent / "external-create-outside"
+    external.mkdir()
+
+    def swap_outside(
+        gateway: GitCliGateway,
+        repo_root: Path,
+        *,
+        directory: DirectoryHandle,
+        name: str,
+        branch: str,
+    ) -> None:
+        namespace.rename(moved_namespace)
+        namespace.symlink_to(external, target_is_directory=True)
+        original_add(gateway, repo_root, directory=directory, name=name, branch=branch)
+
+    monkeypatch.setattr(GitCliGateway, "add_worktree_bound", swap_outside)
+    service = WorktreeService(
+        ApplicationPorts(
+            git=GitCliGateway(),
+            bootstrap=MakeCliGateway(),
+            filesystem=FilesystemCliGateway(),
+            environment=EnvironmentAdapter(),
+        )
+    )
+
+    try:
+        service.create(
+            CreateRequest(
+                repo_root=temp_git_repo.path,
+                root=central_root,
+                label="outside",
+                bootstrap_enabled=False,
+            )
+        )
+    except ExpectedError:
+        pass
+    else:
+        raise AssertionError("namespace escape must fail before Git mutation")
+
+    assert not (external / f"{temp_git_repo.path.name}-outside").exists()
+    assert not (moved_namespace / f"{temp_git_repo.path.name}-outside").exists()
+
+
+def test_create_namespace_swap_outside_root_after_bound_check_is_rejected(
+    temp_git_repo: TempGitRepository, central_root: Path, monkeypatch
+) -> None:
+    namespace = central_root / temp_git_repo.path.name
+    moved_namespace = central_root.parent / f"{temp_git_repo.path.name}-after-check"
+    external = central_root.parent / "external-create-after-check"
+    external.mkdir()
+    original_check = DirectoryHandle.is_within_bound_root
+    swapped = False
+
+    def swap_after_check(handle: DirectoryHandle) -> bool:
+        nonlocal swapped
+        result = original_check(handle)
+        if not swapped:
+            swapped = True
+            namespace.rename(moved_namespace)
+            namespace.symlink_to(external, target_is_directory=True)
+        return result
+
+    monkeypatch.setattr(DirectoryHandle, "is_within_bound_root", swap_after_check)
+    service = WorktreeService(
+        ApplicationPorts(
+            git=GitCliGateway(),
+            bootstrap=MakeCliGateway(),
+            filesystem=FilesystemCliGateway(),
+            environment=EnvironmentAdapter(),
+        )
+    )
+
+    with pytest.raises(ExpectedError) as caught:
+        service.create(
+            CreateRequest(
+                repo_root=temp_git_repo.path,
+                root=central_root,
+                label="after-check",
+                bootstrap_enabled=False,
+            )
+        )
+
+    assert caught.value.code == "git_worktree_add_failed"
+    assert swapped
+    assert not (moved_namespace / f"{temp_git_repo.path.name}-after-check").exists()
+    assert not (external / f"{temp_git_repo.path.name}-after-check").exists()
+
+
+def test_remove_namespace_swap_outside_root_is_rejected_before_git(
+    temp_git_repo: TempGitRepository, central_root: Path, monkeypatch
+) -> None:
+    ports = ApplicationPorts(
+        git=GitCliGateway(),
+        bootstrap=MakeCliGateway(),
+        filesystem=FilesystemCliGateway(),
+        environment=EnvironmentAdapter(),
+    )
+    service = WorktreeService(ports)
+    created = service.create(
+        CreateRequest(
+            repo_root=temp_git_repo.path,
+            root=central_root,
+            label="remove",
+            bootstrap_enabled=False,
+        )
+    )
+    namespace = central_root / temp_git_repo.path.name
+    moved_namespace = central_root.parent / f"{temp_git_repo.path.name}-remove-outside"
+    external = central_root.parent / "external-remove-outside"
+    external.mkdir()
+    original_remove = GitCliGateway.remove_worktree_bound
+
+    def swap_outside(
+        gateway: GitCliGateway,
+        repo_root: Path,
+        *,
+        directory: DirectoryHandle,
+        name: str,
+        force: bool,
+    ) -> None:
+        namespace.rename(moved_namespace)
+        namespace.symlink_to(external, target_is_directory=True)
+        original_remove(gateway, repo_root, directory=directory, name=name, force=force)
+
+    monkeypatch.setattr(GitCliGateway, "remove_worktree_bound", swap_outside)
+
+    with pytest.raises(ExpectedError) as caught:
+        service.remove(
+            RemoveRequest(
+                repo_root=temp_git_repo.path,
+                root=central_root,
+                target=created.id,
+                force=True,
+            )
+        )
+
+    assert caught.value.code == "git_worktree_remove_failed"
+    assert (moved_namespace / f"{temp_git_repo.path.name}-remove").is_dir()
+    assert not (external / f"{temp_git_repo.path.name}-remove").exists()
+
+
+def test_remove_namespace_swap_outside_root_after_bound_check_is_rejected(
+    temp_git_repo: TempGitRepository, central_root: Path, monkeypatch
+) -> None:
+    ports = ApplicationPorts(
+        git=GitCliGateway(),
+        bootstrap=MakeCliGateway(),
+        filesystem=FilesystemCliGateway(),
+        environment=EnvironmentAdapter(),
+    )
+    service = WorktreeService(ports)
+    created = service.create(
+        CreateRequest(
+            repo_root=temp_git_repo.path,
+            root=central_root,
+            label="remove-after-check",
+            bootstrap_enabled=False,
+        )
+    )
+    namespace = central_root / temp_git_repo.path.name
+    moved_namespace = central_root.parent / f"{temp_git_repo.path.name}-remove-after-check"
+    external = central_root.parent / "external-remove-after-check"
+    external.mkdir()
+    original_check = DirectoryHandle.is_within_bound_root
+    swapped = False
+
+    def swap_after_check(handle: DirectoryHandle) -> bool:
+        nonlocal swapped
+        result = original_check(handle)
+        if not swapped:
+            swapped = True
+            namespace.rename(moved_namespace)
+            namespace.symlink_to(external, target_is_directory=True)
+        return result
+
+    monkeypatch.setattr(DirectoryHandle, "is_within_bound_root", swap_after_check)
+
+    with pytest.raises(ExpectedError) as caught:
+        service.remove(
+            RemoveRequest(
+                repo_root=temp_git_repo.path,
+                root=central_root,
+                target=created.id,
+                force=True,
+            )
+        )
+
+    assert caught.value.code == "git_worktree_remove_failed"
+    assert swapped
+    assert (moved_namespace / f"{temp_git_repo.path.name}-remove-after-check").is_dir()
+    assert not (external / f"{temp_git_repo.path.name}-remove-after-check").exists()
+
+
 def test_create_without_label_text_contract_uses_wt1_and_absolute_path(
     temp_git_repo: TempGitRepository, central_root: Path, cli_runner
 ) -> None:
@@ -192,6 +392,25 @@ def test_create_from_linked_checkout_uses_main_namespace_and_linked_branch_prefi
     assert expected_namespace.name == temp_git_repo.path.name
     assert expected_path.parent == expected_namespace
     assert expected_path.is_dir()
+
+
+def test_create_from_diverged_linked_checkout_uses_linked_head_as_start_point(
+    temp_git_repo: TempGitRepository, central_root: Path, cli_runner
+) -> None:
+    linked = central_root / "invocation-linked"
+    temp_git_repo.git("worktree", "add", "-b", "linked", str(linked))
+    (linked / "linked-only.txt").write_text("linked\n", encoding="utf-8")
+    temp_git_repo.git("-C", str(linked), "add", "linked-only.txt")
+    temp_git_repo.git("-C", str(linked), "commit", "-m", "linked head")
+    linked_head = temp_git_repo.git("-C", str(linked), "rev-parse", "HEAD").stdout.strip()
+
+    result = cli_runner("create", "child", "--no-bootstrap", "--json", repo=linked, root=central_root)
+    assert result.returncode == 0, result.stderr
+    created_path = central_root / temp_git_repo.path.name / f"{temp_git_repo.path.name}-child"
+    created_head = temp_git_repo.git("rev-parse", "refs/heads/linked-child").stdout.strip()
+
+    assert created_head == linked_head
+    assert (created_path / "linked-only.txt").read_text(encoding="utf-8") == "linked\n"
 
 
 def test_create_without_label_skips_directory_only_collision(

@@ -11,6 +11,7 @@ from worktree_provisioner.application.contracts import (
     CreateResult,
     ErrorCode,
     ExpectedError,
+    GitWorktreeRecord,
     ListResult,
     RemoveResult,
     ResultWarning,
@@ -166,11 +167,23 @@ def test_dumps_escapes_surrogateescape_paths_as_reversible_utf8() -> None:
 def test_json_value_restores_valid_utf8_surrogateescape_paths() -> None:
     utf8_surrogate_path = b"/tmp/repo-\xe6\x97\xa5\xe6\x9c\xac".decode("ascii", errors="surrogateescape")
     raw_surrogate_path = b"/tmp/repo-\xff".decode("ascii", errors="surrogateescape")
+    utf8_surrogate_branch = b"feature-\xe6\x97\xa5".decode("ascii", errors="surrogateescape")
 
     converted = cast(dict[str, Any], json_value({"path": utf8_surrogate_path, "raw": raw_surrogate_path}))
+    record = cast(
+        dict[str, Any],
+        json_value(
+            GitWorktreeRecord(
+                path=Path(utf8_surrogate_path),
+                head=None,
+                branch=utf8_surrogate_branch,
+            )
+        ),
+    )
 
     assert converted["path"] == "/tmp/repo-日本"
     assert converted["raw"] == raw_surrogate_path
+    assert record["branch"] == "feature-日"
 
 
 def test_all_blocker_codes_are_explicitly_typed_in_worktree_payload() -> None:

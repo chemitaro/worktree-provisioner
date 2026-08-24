@@ -454,6 +454,78 @@ def test_cleanup_namespace_swap_to_external_symlink_never_removes_outside(
     assert not (external / target.name).exists()
 
 
+def test_cleanup_namespace_fd_swap_outside_root_is_blocked(
+    tmp_path: Path,
+) -> None:
+    repo, root, target, base_git = _fixture(tmp_path)
+    namespace = root / repo.name
+    moved_namespace = tmp_path / f"{repo.name}-outside-cleanup"
+    external = tmp_path / "external-cleanup-fd"
+    external.mkdir()
+    state = {"git_removed": False, "swapped": False}
+
+    class SwapAfterNamespaceOpenFilesystem(FilesystemCliGateway):
+        def open_directory(self, path: Path) -> DirectoryHandle:
+            directory = FilesystemCliGateway.open_directory(self, path)
+            if path == namespace and state["git_removed"] and not state["swapped"]:
+                state["swapped"] = True
+                namespace.rename(moved_namespace)
+                namespace.symlink_to(external, target_is_directory=True)
+            return directory
+
+    class RemovingGit(FakeGitGateway):
+        def remove_worktree(self, repo_root: Path, *, path: Path, force: bool) -> None:
+            state["git_removed"] = True
+            FakeGitGateway.remove_worktree(self, repo_root, path=path, force=force)
+
+    git = RemovingGit(
+        checkout_root=base_git.checkout_root,
+        records=base_git.records,
+        branches=base_git.branches,
+    )
+
+    with pytest.raises(ExpectedError) as caught:
+        _service(git, SwapAfterNamespaceOpenFilesystem()).remove(_request(repo, root, target, force=True))
+
+    assert caught.value.code == "post_remove_cleanup_failed"
+    assert caught.value.status == "partial"
+    assert state["swapped"]
+    assert (moved_namespace / target.name).is_dir()
+    assert not (external / target.name).exists()
+
+
+def test_cleanup_namespace_fd_swap_after_bound_check_is_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, root, target, base_git = _fixture(tmp_path)
+    namespace = root / repo.name
+    moved_namespace = tmp_path / f"{repo.name}-outside-cleanup-after-check"
+    external = tmp_path / "external-cleanup-after-check"
+    external.mkdir()
+    original_check = DirectoryHandle.is_within_bound_root
+    swapped = False
+
+    def swap_after_check(handle: DirectoryHandle) -> bool:
+        nonlocal swapped
+        result = original_check(handle)
+        if not swapped:
+            swapped = True
+            namespace.rename(moved_namespace)
+            namespace.symlink_to(external, target_is_directory=True)
+        return result
+
+    monkeypatch.setattr(DirectoryHandle, "is_within_bound_root", swap_after_check)
+
+    with pytest.raises(ExpectedError) as caught:
+        _service(base_git).remove(_request(repo, root, target, force=True))
+
+    assert caught.value.code == "post_remove_cleanup_failed"
+    assert caught.value.status == "partial"
+    assert swapped
+    assert (moved_namespace / target.name).is_dir()
+    assert not (external / target.name).exists()
+
+
 def test_post_git_cleanup_failure_is_partial_and_branch_is_retained(tmp_path: Path) -> None:
     repo, root, target, git = _fixture(tmp_path)
 

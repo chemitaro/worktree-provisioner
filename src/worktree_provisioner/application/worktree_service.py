@@ -119,7 +119,7 @@ class WorktreeService:
 
         warnings: list[ResultWarning] = []
         try:
-            self._add_worktree(request.repo_root, namespace=namespace, candidate=candidate)
+            self._add_worktree(request.repo_root, root=root, namespace=namespace, candidate=candidate)
         except Exception as exc:
             # Inspect the failed candidate before deciding whether to retry.
             # The artifact named by a typed collision is the expected race
@@ -309,8 +309,10 @@ class WorktreeService:
             raise self._remove_blocked(request, refreshed, refreshed_blockers)
 
         try:
-            self.ports.git.remove_worktree(
+            self._remove_worktree(
                 request.repo_root,
+                root=root,
+                namespace=refreshed_namespace,
                 path=refreshed.path,
                 force=request.force,
             )
@@ -537,7 +539,7 @@ class WorktreeService:
         if not exists:
             return None
         try:
-            self._remove_target(namespace, target.path)
+            self._remove_target(namespace, target.path, root=root)
         except Exception as exc:
             # A target that disappeared between the existence check and the
             # cleanup adapter is already clean.  Other races and permissions
@@ -552,16 +554,53 @@ class WorktreeService:
             }
         return None
 
-    def _remove_target(self, namespace: Path, target: Path) -> None:
+    def _remove_target(self, namespace: Path, target: Path, *, root: Path | None = None) -> None:
         """Remove a leftover target through a namespace-bound capability."""
 
         open_directory = getattr(self.ports.filesystem, "open_directory", None)
         remove_bound = getattr(self.ports.filesystem, "remove_target_no_follow_bound", None)
         if callable(open_directory) and callable(remove_bound):
-            with open_directory(namespace) as directory:
-                remove_bound(directory, target)
+            if root is None:
+                with open_directory(namespace) as directory:
+                    remove_bound(directory, target)
+            else:
+                with open_directory(root) as root_directory, open_directory(namespace) as directory:
+                    bind_root = getattr(directory, "bind_root", None)
+                    if callable(bind_root):
+                        bind_root(root_directory)
+                    remove_bound(directory, target)
             return
         self.ports.filesystem.remove_target_no_follow(target)
+
+    def _remove_worktree(
+        self,
+        repo_root: Path,
+        *,
+        root: Path,
+        namespace: Path,
+        path: Path,
+        force: bool,
+    ) -> None:
+        """Remove a managed worktree through a root-bound namespace fd."""
+
+        open_directory = getattr(self.ports.filesystem, "open_directory", None)
+        remove_bound = getattr(self.ports.git, "remove_worktree_bound", None)
+        if callable(open_directory) and callable(remove_bound):
+            relative = path.absolute().relative_to(namespace.absolute())
+            if len(relative.parts) != 1:
+                raise RuntimeError("managed worktree path is not a direct namespace child")
+            with open_directory(root) as root_directory, open_directory(namespace) as directory:
+                bind_root = getattr(directory, "bind_root", None)
+                if callable(bind_root):
+                    bind_root(root_directory)
+                remove_bound(
+                    repo_root,
+                    directory=directory,
+                    name=relative.parts[0],
+                    force=force,
+                )
+            return
+        self.ports.git.remove_worktree(repo_root, path=path, force=force)
 
     def _inventory_views(
         self,
@@ -903,6 +942,7 @@ class WorktreeService:
         self,
         repo_root: Path,
         *,
+        root: Path,
         namespace: Path,
         candidate: WorktreeCandidate,
     ) -> None:
@@ -911,7 +951,10 @@ class WorktreeService:
         open_directory = getattr(self.ports.filesystem, "open_directory", None)
         add_worktree_bound = getattr(self.ports.git, "add_worktree_bound", None)
         if callable(open_directory) and callable(add_worktree_bound):
-            with open_directory(namespace) as directory:
+            with open_directory(root) as root_directory, open_directory(namespace) as directory:
+                bind_root = getattr(directory, "bind_root", None)
+                if callable(bind_root):
+                    bind_root(root_directory)
                 add_worktree_bound(
                     repo_root,
                     directory=directory,
@@ -1045,7 +1088,7 @@ class WorktreeService:
                     warnings=warnings,
                 ) from exc
             try:
-                self._add_worktree(request.repo_root, namespace=namespace, candidate=candidate)
+                self._add_worktree(request.repo_root, root=root, namespace=namespace, candidate=candidate)
             except Exception as exc:
                 artifacts = self._observe_artifacts(request.repo_root, candidate, namespace)
                 if is_retryable_git_collision(exc):

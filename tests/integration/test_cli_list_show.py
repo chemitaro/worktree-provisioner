@@ -90,6 +90,40 @@ def test_non_utf8_linked_worktree_path_is_valid_json_and_removable(
     assert all(ord(character) < 128 for character in shown.stdout)
     assert shown_payload["result"]["worktree"]["path"] == str(invalid_path)
 
+    text_path = Path(os.fsdecode(os.fsencode(namespace) + b"/" + temp_git_repo.path.name.encode() + b"-text-\xfe"))
+    text_added = subprocess.run(
+        ["git", "worktree", "add", "-b", "invalid-text", str(text_path)],
+        cwd=temp_git_repo.path,
+        capture_output=True,
+        text=False,
+        check=False,
+    )
+    if text_added.returncode != 0:
+        pytest.skip(f"Git/filesystem does not support this second raw pathname: {os.fsdecode(text_added.stderr)}")
+
+    text_listed = cli_runner("list", repo=temp_git_repo.path, root=central_root, environment=environment)
+    text_shown = cli_runner(
+        "show",
+        str(text_path),
+        repo=temp_git_repo.path,
+        root=central_root,
+        environment=environment,
+    )
+    assert text_listed.returncode == 0, text_listed.stderr
+    assert text_shown.returncode == 0, text_shown.stderr
+    assert all(ord(character) < 128 for character in text_listed.stdout + text_shown.stdout)
+
+    text_removed = cli_runner(
+        "remove",
+        str(text_path),
+        repo=temp_git_repo.path,
+        root=central_root,
+        environment=environment,
+    )
+    assert text_removed.returncode == 0, text_removed.stderr
+    assert all(ord(character) < 128 for character in text_removed.stdout)
+    assert not text_path.exists()
+
     removed = cli_runner(
         "remove",
         str(invalid_path),
@@ -143,6 +177,65 @@ def test_json_wire_is_ascii_safe_under_c_locale_for_unicode_paths(
     assert removed.returncode == 0, removed.stderr
     assert all(ord(character) < 128 for character in removed.stdout)
     assert not target.exists()
+
+
+def test_text_wire_is_safe_under_c_locale_for_unicode_paths(git_repo_factory, tmp_path: Path, cli_runner) -> None:
+    repo = git_repo_factory(name="repo-日本語")
+    root = tmp_path / "managed-日本語"
+    environment = {
+        "LC_ALL": "C",
+        "LANG": "C",
+        "PYTHONCOERCECLOCALE": "0",
+        "PYTHONUTF8": "0",
+        "PYTHONIOENCODING": "ascii",
+    }
+
+    created = cli_runner("create", "unicode", "--no-bootstrap", repo=repo.path, root=root, environment=environment)
+    assert created.returncode == 0, created.stderr
+    assert all(ord(character) < 128 for character in created.stdout)
+    target = root / repo.path.name / f"{repo.path.name}-unicode"
+
+    listed = cli_runner("list", repo=repo.path, root=root, environment=environment)
+    shown = cli_runner("show", "unicode", repo=repo.path, root=root, environment=environment)
+    removed = cli_runner("remove", "unicode", repo=repo.path, root=root, environment=environment)
+
+    assert listed.returncode == 0, listed.stderr
+    assert shown.returncode == 0, shown.stderr
+    assert removed.returncode == 0, removed.stderr
+    assert all(ord(character) < 128 for character in listed.stdout + shown.stdout + removed.stdout)
+    assert r"\u65e5" in created.stdout
+    assert not target.exists()
+
+
+def test_json_and_text_restore_utf8_branch_under_c_locale(
+    git_repo_factory, tmp_path: Path, cli_runner, json_loads
+) -> None:
+    repo = git_repo_factory()
+    linked = tmp_path / "invocation-linked"
+    repo.git("branch", "機能")
+    repo.git("worktree", "add", str(linked), "機能")
+    root = tmp_path / "managed"
+    environment = {
+        "LC_ALL": "C",
+        "LANG": "C",
+        "PYTHONCOERCECLOCALE": "0",
+        "PYTHONUTF8": "0",
+        "PYTHONIOENCODING": "ascii",
+    }
+
+    created = cli_runner("create", "child", "--no-bootstrap", "--json", repo=linked, root=root, environment=environment)
+    payload = _payload(created, json_loads)
+    assert created.returncode == 0, created.stderr
+    assert payload["result"]["branch"] == "機能-child"
+    assert all(ord(character) < 128 for character in created.stdout)
+
+    shown = cli_runner("show", "child", repo=linked, root=root, environment=environment)
+    assert shown.returncode == 0, shown.stderr
+    assert all(ord(character) < 128 for character in shown.stdout)
+    assert r"\u6a5f" in shown.stdout
+
+    removed = cli_runner("remove", "child", "--json", repo=linked, root=root, environment=environment)
+    assert removed.returncode == 0, removed.stderr
 
 
 def test_show_supports_id_and_absolute_path_selectors(

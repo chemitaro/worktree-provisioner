@@ -40,6 +40,22 @@ def test_ensure_directory_is_idempotent_for_actual_directory(tmp_path: Path) -> 
     assert gateway.lstat_kind(target) == "directory"
 
 
+def test_open_directory_resolves_ancestor_symlink_but_rejects_leaf_symlink(tmp_path: Path) -> None:
+    gateway = FilesystemCliGateway()
+    actual = tmp_path / "actual"
+    leaf = actual / "leaf"
+    actual.mkdir()
+    leaf.mkdir()
+    ancestor_link = tmp_path / "ancestor-link"
+    ancestor_link.symlink_to(actual, target_is_directory=True)
+
+    with gateway.open_directory(ancestor_link / "leaf") as handle:
+        assert handle.path == leaf.resolve()
+
+    with pytest.raises(FilesystemAdapterError):
+        gateway.open_directory(ancestor_link)
+
+
 @pytest.mark.parametrize("kind", ["file", "symlink"])
 def test_ensure_directory_rejects_non_directory_and_namespace_symlink(tmp_path: Path, kind: str) -> None:
     gateway = FilesystemCliGateway()

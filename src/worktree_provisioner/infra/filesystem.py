@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import os
 import shutil
 import stat
@@ -116,15 +117,23 @@ class FilesystemCliGateway:
 
         target = _validated_path(path)
         try:
-            fd = _open_directory_path(target)
+            opened_path = _canonical_directory_path(target)
+            fd = _open_directory_path(opened_path)
         except (PermissionError, OSError) as exc:
             raise _wrapped_error("open_directory", target, exc) from exc
-        return DirectoryHandle(fd=fd, path=target.absolute())
+        return DirectoryHandle(fd=fd, path=opened_path)
 
     def remove_target_no_follow_bound(self, directory: DirectoryHandle, target: Path) -> None:
         """Remove ``target`` beneath an already-open directory descriptor."""
 
         target_path = _validated_path(target)
+        if not directory.is_within_bound_root():
+            raise FilesystemAdapterError(
+                operation="remove_target_no_follow_bound",
+                path=target_path,
+                kind="outside",
+                message=f"cleanup namespace is outside the managed root: {directory.path}",
+            )
         try:
             relative = target_path.absolute().relative_to(directory.path.absolute())
         except ValueError as exc:
@@ -143,6 +152,13 @@ class FilesystemCliGateway:
                 message=f"cleanup target is not a descendant: {target_path}",
             )
 
+        if not directory.is_within_bound_root():
+            raise FilesystemAdapterError(
+                operation="remove_target_no_follow_bound",
+                path=target_path,
+                kind="outside",
+                message=f"cleanup namespace is outside the managed root: {directory.path}",
+            )
         parent_fd = os.dup(directory.fd)
         try:
             for component in components[:-1]:
@@ -165,6 +181,7 @@ class DirectoryHandle:
 
     fd: int
     path: Path
+    root: DirectoryHandle | None = None
 
     def __enter__(self) -> DirectoryHandle:
         return self
@@ -189,6 +206,26 @@ class DirectoryHandle:
         except OSError:
             return False
         return (current.st_dev, current.st_ino) == (opened.st_dev, opened.st_ino)
+
+    def bind_root(self, root: DirectoryHandle) -> None:
+        """Attach the opened managed root used to constrain mutations."""
+
+        self.root = root
+
+    def is_within_bound_root(self) -> bool:
+        """Return whether this descriptor currently resolves below its root fd."""
+
+        if self.root is None:
+            return self.path_identity_matches()
+        if not self.root.path_identity_matches():
+            return False
+        root_path = _descriptor_path(self.root.fd)
+        namespace_path = _descriptor_path(self.fd)
+        if root_path is None or namespace_path is None:
+            return False
+        if root_path != self.root.path.absolute():
+            return False
+        return namespace_path != root_path and root_path in namespace_path.parents
 
 
 FilesystemGateway = FilesystemCliGateway
@@ -220,7 +257,7 @@ def _directory_flags() -> int:
 
 
 def _open_directory_path(path: Path) -> int:
-    target = path.absolute()
+    target = _canonical_directory_path(path)
     if ".." in target.parts:
         raise OSError("directory path contains a parent traversal")
     parts = target.parts
@@ -239,8 +276,52 @@ def _open_directory_path(path: Path) -> int:
         raise
 
 
+def _canonical_directory_path(path: Path) -> Path:
+    """Resolve ancestors while leaving the final entry no-follow protected."""
+
+    target = path.absolute()
+    if ".." in target.parts:
+        raise OSError("directory path contains a parent traversal")
+    if not target.anchor:
+        raise OSError("directory path must be absolute")
+    if target == Path(target.anchor):
+        return target
+    try:
+        parent = target.parent.resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise
+    return parent / target.name
+
+
 def _open_child_directory(parent_fd: int, name: str) -> int:
     return os.open(name, _directory_flags(), dir_fd=parent_fd)
+
+
+def _descriptor_path(fd: int) -> Path | None:
+    """Resolve a directory fd through the platform's descriptor namespace."""
+
+    getpath = getattr(fcntl, "F_GETPATH", None)
+    if getpath is not None:
+        try:
+            raw = fcntl.fcntl(fd, getpath, b"\0" * 1024)
+        except OSError:
+            pass
+        else:
+            value = raw.split(b"\0", 1)[0]
+            if value:
+                return Path(os.fsdecode(value))
+
+    for directory in ("/proc/self/fd", "/dev/fd"):
+        try:
+            target = os.readlink(os.path.join(directory, str(fd)))
+        except OSError:
+            continue
+        if target.endswith(" (deleted)"):
+            target = target[: -len(" (deleted)")]
+        path = Path(target)
+        if path.is_absolute():
+            return path
+    return None
 
 
 def _remove_entry_at(parent_fd: int, name: str, path: Path) -> None:

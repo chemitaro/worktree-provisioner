@@ -22,23 +22,28 @@ def render_success(result: CreateResult | ListResult | ShowResult | RemoveResult
         worktree_path = _absolute_path(result.worktree_path)
         return "\n".join(
             (
-                f"worktree-provisioner: ok (create) id={result.id} branch={result.branch} path={worktree_path}",
+                f"worktree-provisioner: ok (create) id={_safe_text(result.id)} "
+                f"branch={_safe_text(result.branch)} path={worktree_path}",
                 f"worktree-provisioner: bootstrap status={result.bootstrap.status} command={command}{exit_code}",
             )
         )
     if isinstance(result, ListResult):
         lines = [f"worktree-provisioner: ok (list) count={len(result.worktrees)}"]
-        lines.extend(f"{item.id}\t{item.branch or '-'}\t{_absolute_path(item.path)}" for item in result.worktrees)
+        lines.extend(
+            f"{_safe_text(item.id)}\t{_safe_text(item.branch or '-')}\t{_absolute_path(item.path)}"
+            for item in result.worktrees
+        )
         return "\n".join(lines)
     if isinstance(result, ShowResult):
         worktree_path = _absolute_path(result.worktree.path)
         return (
             "worktree-provisioner: ok (show) "
-            f"id={result.worktree.id} branch={result.worktree.branch or '-'} path={worktree_path}"
+            f"id={_safe_text(result.worktree.id)} "
+            f"branch={_safe_text(result.worktree.branch or '-')} path={worktree_path}"
         )
     return (
         "worktree-provisioner: ok (remove) "
-        f"target={result.target} path={_absolute_path(result.resolved_target.path)} "
+        f"target={_safe_text(result.target)} path={_absolute_path(result.resolved_target.path)} "
         f"removed_record={result.removed_record} removed_directory={result.removed_directory}"
     )
 
@@ -57,7 +62,7 @@ def render_error(error: ExpectedError) -> tuple[str, str]:
         stdout = "\n".join(
             (
                 "worktree-provisioner: partial (create) "
-                f"id={create_result.id} branch={create_result.branch} path={worktree_path}",
+                f"id={_safe_text(create_result.id)} branch={_safe_text(create_result.branch)} path={worktree_path}",
                 f"worktree-provisioner: bootstrap status={create_result.bootstrap.status} command={command}{exit_code}",
             )
         )
@@ -65,10 +70,10 @@ def render_error(error: ExpectedError) -> tuple[str, str]:
         remove_result = error.result
         stdout = (
             "worktree-provisioner: partial (remove) "
-            f"target={remove_result.target} path={_absolute_path(remove_result.resolved_target.path)} "
+            f"target={_safe_text(remove_result.target)} path={_absolute_path(remove_result.resolved_target.path)} "
             f"removed_record={remove_result.removed_record} removed_directory={remove_result.removed_directory}"
         )
-    stderr_lines = [f"worktree-provisioner: error: {error.message}"]
+    stderr_lines = [f"worktree-provisioner: error: {_safe_text(error.message)}"]
     stderr_lines.extend(render_warnings(error.result, warnings=error.warnings))
     stderr = "\n".join(stderr_lines)
     return stdout, stderr
@@ -86,8 +91,7 @@ def render_warnings(
 
 
 def _warning_line(warning: ResultWarning) -> str:
-    message = warning.message.replace("\r", "\\r").replace("\n", "\\n")
-    safe_message = message.encode("utf-8", errors="backslashreplace").decode("utf-8")
+    safe_message = _safe_text(warning.message)
     line = f"worktree-provisioner: warning: code={warning.code} message={safe_message}"
     if warning.facts:
         facts = " ".join(f"{key}={_safe_fact(value)}" for key, value in sorted(warning.facts.items()))
@@ -96,13 +100,17 @@ def _warning_line(warning: ResultWarning) -> str:
 
 
 def _safe_fact(value: object) -> str:
-    rendered = str(value).replace("\r", "\\r").replace("\n", "\\n")
-    return rendered.encode("utf-8", errors="backslashreplace").decode("utf-8")
+    return _safe_text(value)
 
 
 def _absolute_path(path: Path) -> str:
     candidate = path.expanduser()
-    return str(candidate if candidate.is_absolute() else candidate.absolute())
+    return _safe_text(candidate if candidate.is_absolute() else candidate.absolute())
+
+
+def _safe_text(value: object) -> str:
+    rendered = str(value).replace("\r", "\\r").replace("\n", "\\n")
+    return rendered.encode("ascii", errors="backslashreplace").decode("ascii")
 
 
 __all__ = ["render_error", "render_success", "render_warnings"]

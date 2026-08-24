@@ -127,7 +127,7 @@ class MakeCliGateway:
 
         detection_detail = _diagnostic(detected.stdout, detected.stderr)
         if detected.returncode != 0:
-            if self.runner is None and _static_proves_init_absent(makefile):
+            if self.runner is None and _static_init_rule_state(makefile) == "absent":
                 return _skipped()
             return BootstrapResult(
                 requested=True,
@@ -135,6 +135,17 @@ class MakeCliGateway:
                 command=detection_argv,
                 exit_code=detected.returncode,
                 detail=detection_detail or "make init detection failed",
+            )
+        static_state = _static_init_rule_state(makefile)
+        if static_state == "absent":
+            return _skipped()
+        if static_state == "unknown":
+            return BootstrapResult(
+                requested=True,
+                status="detection_failed",
+                command=detection_argv,
+                exit_code=detected.returncode,
+                detail=detection_detail or "make init target detection was inconclusive",
             )
         if not has_init_target:
             return _skipped()
@@ -339,102 +350,144 @@ def _run_direct_detection(make_executable: str, cwd: Path) -> tuple[subprocess.C
     return direct, direct.returncode == 0
 
 
-def _static_proves_init_absent(makefile: Path) -> bool:
-    """Return true only for a plainly parseable file with no init rule.
+def _static_init_rule_state(makefile: Path) -> str:
+    """Classify source facts needed after direct Make evaluation."""
 
-    This is intentionally a narrow source scan, not a Make parser.  Any
-    construct that can change the rule graph or make interpretation causes a
-    conservative detection failure instead of a false ``skipped`` result.
-    """
-
-    # These variables alter the makefile graph or command-line state outside
-    # this file.  A direct non-zero probe cannot prove that ``init`` is absent
-    # while any of them is active, so fail closed.
     if any(name in os.environ for name in _MAKE_AUTHORITY_VARIABLES):
-        return False
+        return "unknown"
+    found, safe = _scan_static_makefile(makefile, seen=set(), cwd=makefile.absolute().parent)
+    if found:
+        return "present"
+    return "absent" if safe else "unknown"
+
+
+def _scan_static_makefile(makefile: Path, *, seen: set[Path], cwd: Path) -> tuple[bool, bool]:
+    """Return whether an explicit init rule was found and absence is safe."""
+
+    logical_path = makefile.absolute()
     try:
-        with makefile.open("rb") as stream:
+        identity = logical_path.resolve(strict=True)
+    except OSError:
+        return False, False
+    if identity in seen:
+        return False, False
+    seen.add(identity)
+    try:
+        with identity.open("rb") as stream:
             source = stream.read(_STATIC_MAKEFILE_LIMIT + 1)
     except OSError:
-        return False
+        return False, False
     if len(source) > _STATIC_MAKEFILE_LIMIT or b"\0" in source:
-        return False
+        return False, False
     try:
         text = source.decode("utf-8")
     except UnicodeDecodeError:
-        return False
+        return False, False
     if "\ufeff" in text:
-        return False
+        return False, False
 
-    saw_rule = False
+    found = False
+    safe = True
+    pending_rule = False
+    assignment_after_rule = False
+    recipe_active = False
     for raw_line in text.splitlines():
         line = raw_line.rstrip("\r")
         if _has_line_continuation(line):
-            return False
+            safe = False
         if line.startswith("\t"):
-            if not saw_rule:
-                return False
+            if assignment_after_rule or (not pending_rule and not recipe_active):
+                safe = False
             if "$" in line or any(name in line for name in _MAKE_AUTHORITY_VARIABLES | {"origin"}):
-                return False
+                safe = False
+            recipe_active = True
+            pending_rule = False
             continue
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
-        # Inline comments cannot be parsed safely without reproducing Make's
-        # escaping rules; ignoring their tail keeps this proof conservative.
         semantic = line.split("#", 1)[0].strip()
         if not semantic:
             continue
+
+        include = _static_include_path(semantic, cwd=cwd, parent=logical_path.parent)
+        if include is not None:
+            child_found, child_safe = _scan_static_makefile(include, seen=seen, cwd=cwd)
+            found |= child_found
+            safe &= child_safe
+            recipe_active = False
+            continue
+        if _is_include_directive(semantic):
+            safe = False
+            recipe_active = False
+            continue
         if "$" in semantic or "%" in semantic:
-            return False
+            safe = False
         if _UNSAFE_MAKE_DIRECTIVE.match(semantic):
-            return False
+            safe = False
+
         assignment = _MAKE_ASSIGNMENT.match(semantic)
         if assignment is not None:
             if assignment.group("name") in _MAKE_AUTHORITY_VARIABLES:
-                return False
-            # An assignment after a rule header can make a following tabbed
-            # recipe cease to belong to that rule (GNU Make reports
-            # ``commands commence before first target``).  Target-specific
-            # assignments also contain a second colon and require Make's
-            # own graph semantics.  Neither form is safe for this source-only
-            # absence proof.
-            if saw_rule or ":" in semantic[assignment.end() :]:
-                return False
+                safe = False
+            if ":" in semantic[assignment.end() :]:
+                safe = False
+            if pending_rule:
+                assignment_after_rule = True
+            recipe_active = False
             continue
+
         colon = semantic.find(":")
         if colon < 1:
-            return False
+            safe = False
+            recipe_active = False
+            continue
         left = semantic[:colon].strip()
         if not left or "\\" in left:
-            return False
+            safe = False
         if left == ".PHONY":
-            if any(token == "init" or _is_makefile_target(token) for token in semantic[colon + 1 :].split()):
-                return False
-            saw_rule = True
+            if "init" in semantic[colon + 1 :].split():
+                found = True
+            pending_rule = True
+            assignment_after_rule = False
+            recipe_active = False
             continue
         if left.startswith("."):
-            return False
+            safe = False
         if "init" in left.split():
-            return False
-        # ``target: VAR=value`` is a target-specific assignment, not a plain
-        # prerequisite list.  Its meaning depends on Make's rule context and
-        # must not be accepted by this intentionally tiny absence proof.
+            found = True
         if "=" in semantic[colon + 1 :]:
-            return False
-        # A rule that can remake the selected makefile means the direct
-        # failure may depend on a generated/reloaded source.  It is not safe
-        # to reinterpret that graph with a source-only absence proof.
+            safe = False
         if any(_is_makefile_target(token) for token in left.split()):
-            return False
-        # Multiple unescaped colons in a normal rule header are ambiguous to
-        # this deliberately small proof (double-colon rules are rejected as
-        # well).  Let make's direct failure remain detection_failed instead of
-        # guessing whether the text was a valid rule.
+            safe = False
         if ":" in semantic[colon + 1 :]:
-            return False
-        saw_rule = True
-    return True
+            safe = False
+        pending_rule = True
+        assignment_after_rule = False
+        recipe_active = False
+
+    return found, safe
+
+
+def _static_include_path(semantic: str, *, cwd: Path, parent: Path) -> Path | None:
+    match = re.match(r"^(?:-?include|sinclude)\s+(.+)$", semantic, flags=re.IGNORECASE)
+    if match is None:
+        return None
+    value = match.group(1).strip()
+    prefix = "$(dir $(lastword $(MAKEFILE_LIST)))"
+    relative_to_makefile = value.startswith(prefix)
+    if relative_to_makefile:
+        value = value[len(prefix) :].strip()
+    if not value or "$" in value or any(char in value for char in "*?["):
+        return None
+    candidate = Path(value)
+    if candidate.is_absolute():
+        return candidate
+    return (parent if relative_to_makefile else cwd) / candidate
+
+
+def _is_include_directive(semantic: str) -> bool:
+    return re.match(r"^(?:-?include|sinclude)\b", semantic, flags=re.IGNORECASE) is not None
 
 
 def _is_makefile_target(token: str) -> bool:

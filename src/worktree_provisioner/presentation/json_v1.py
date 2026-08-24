@@ -157,21 +157,21 @@ def json_value(value: object) -> object:
     if isinstance(value, Path):
         return _absolute_path(value)
     if isinstance(value, BootstrapResult):
-        return bootstrap_payload(value)
+        return json_value(bootstrap_payload(value))
     if isinstance(value, ArtifactState):
-        return artifact_payload(value)
+        return json_value(artifact_payload(value))
     if isinstance(value, WorktreeRecordView):
-        return worktree_payload(value)
+        return json_value(worktree_payload(value))
     if isinstance(value, GitWorktreeRecord):
-        return git_record_payload(value)
+        return json_value(git_record_payload(value))
     if isinstance(value, CreateResult):
-        return create_payload(value)
+        return json_value(create_payload(value))
     if isinstance(value, ListResult):
-        return list_payload(value)
+        return json_value(list_payload(value))
     if isinstance(value, ShowResult):
-        return show_payload(value)
+        return json_value(show_payload(value))
     if isinstance(value, RemoveResult):
-        return remove_payload(value)
+        return json_value(remove_payload(value))
     if isinstance(value, Mapping):
         return {str(key): json_value(item) for key, item in value.items()}
     if isinstance(value, (tuple, list)):
