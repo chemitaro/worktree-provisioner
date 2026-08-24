@@ -2,790 +2,675 @@
 document: plan
 product: worktree-provisioner
 status: proposed
-baseline_repository: chemitaro/spec-dock
-baseline_branch: main
-baseline_sha: ff09fd05d9862c399d4e22e760170dcb8c46ec6a
+verified_repository: chemitaro/worktree-provisioner
+verified_branch: main
+verified_sha: 18c80a1f222a31df0617df5c8193388b3c301e0e
+owner_decision_source: docs/interview.md
+owner_decision_status: complete
 verified_at: 2026-08-24
 language: ja
 ---
 
 # worktree-provisioner 実装計画
 
-## 1. 計画の前提
+## 1. 計画の目的と境界
 
-- 本計画は implementation-ready proposal であり、現時点で file modification / commit / push / publication は行っていない。
-- source behavior baseline は `chemitaro/spec-dock@ff09fd05d9862c399d4e22e760170dcb8c46ec6a` とする。
-- destination prototype は evidence であり、accepted design ではない。
-- tool delivery では `/Volumes/990p2t/workspace/tools/spec-dock` を変更しない。
-- destination は commit / remote / upstream がないというユーザー提示情報を、実装開始時に local Git command で再確認する。
-- `SEC-DEC-001`、`SEC-DEC-002`、`SEC-DEC-003` を Step 0 で owner decision にする。
+本計画は `worktree-provisioner` standalone tool、versioned JSON interface、Codex skill、thin wrapper を後続実装タスクで完成させるための ordered plan である。現時点では code implementation、commit、push、release を完了したとは扱わない。
 
-## 2. 推奨実装順序
+計画 baseline:
+
+- repository: `chemitaro/worktree-provisioner`
+- branch: `main`
+- verified SHA: `18c80a1f222a31df0617df5c8193388b3c301e0e`
+- owner decisions: `docs/interview.md` complete
+- current implementation: create-only prototype
+
+本計画は SpecDock repository の変更を一切含まない。SpecDock CLI の shim、deprecation、削除、migration、docs/tests更新を行う phase は設けない。
+
+## 2. Non-negotiable implementation constraints
+
+実装者は次を再決定しない。
+
+- `create` / `list` / `show` / `remove` を初期版で同時に完成する。
+- `SPEC_DOCK_WORKTREE_ROOT` を読まない。
+- bootstrap failure は retained worktree + exit `1` + JSON `partial`。
+- remove default non-force、`--force`はsingle force。
+- locked targetはforceでも拒否。
+- external targetは表示のみ、remove不可。
+- namespace symlinkではcreate/remove不可。
+- skillはinstalled CLIのthin wrapperだけを使う。
+- force intentは別途明示が必要。
+- skillはCodex taskを作成・移動しない。
+- status/prune/repair/branch deletion/remote/GitHub/Workbenchを追加しない。
+- SpecDock-side workを追加しない。
+
+## 3. Recommended delivery sequence
 
 ```text
-P0 baseline / decision freeze
-  -> P1 destination inventory / scaffold
-  -> P2 test harness and parity matrix first
-  -> P3 contracts / ports / infra extraction
-  -> P4 create use case
-  -> P5 list / show / target resolution
-  -> P6 remove / containment / cleanup
-  -> P7 CLI / text / JSON
-  -> P8 docs / packaging / license
-  -> P9 differential parity / full verification
-  -> P10 local delivery handoff
-  -> P11 separate SpecDock migration (not part of tool delivery)
+P0  authority and baseline guard
+  -> P1  executable contract tests
+  -> P2  package/module scaffold normalization
+  -> P3  contracts and adapters
+  -> P4  create and bootstrap partial semantics
+  -> P5  list/show inventory and target resolver
+  -> P6  managed-only remove and cleanup
+  -> P7  CLI, text, JSON schema v1
+  -> P8  Codex skill and thin wrapper
+  -> P9  docs, packaging, installation, CI
+  -> P10 full verification and handoff
 ```
 
-## 3. Step P0 — Baseline and decision freeze
+各phaseは前phaseのgateを満たしてから進む。`application/worktree_service.py` のようなshared fileはsequential ownership handoffとし、parallel writerを置かない。
 
-### 3.1 目的
-
-実装対象 revision、prototype の実状態、security-sensitive contract を固定し、誤った branch / stale attachment / silent policy choice から実装を開始しない。
-
-### 3.2 作業
-
-1. source local repository を確認する。
-
-```bash
-git -C /Volumes/990p2t/workspace/tools/spec-dock rev-parse --show-toplevel
-git -C /Volumes/990p2t/workspace/tools/spec-dock rev-parse HEAD
-git -C /Volumes/990p2t/workspace/tools/spec-dock branch --show-current
-git -C /Volumes/990p2t/workspace/tools/spec-dock status --short --untracked-files=all
-```
-
-2. source local `HEAD` が baseline と異なる場合、local checkout を silent authority にしない。
-3. differential test 用には source repository を直接変更せず、local clone を作る。
-
-```bash
-tmp_source="$(mktemp -d)/spec-dock-baseline"
-git clone --no-local /Volumes/990p2t/workspace/tools/spec-dock "$tmp_source"
-git -C "$tmp_source" checkout --detach ff09fd05d9862c399d4e22e760170dcb8c46ec6a
-```
-
-network clone を必要としない。local source に baseline object がない場合は stop し、勝手に別 revision を使わない。
-
-4. destination を完全 inventory する。
-
-```bash
-git -C /Volumes/990p2t/workspace/tools/worktree-provisioner rev-parse --show-toplevel
-git -C /Volumes/990p2t/workspace/tools/worktree-provisioner rev-parse --verify HEAD
-git -C /Volumes/990p2t/workspace/tools/worktree-provisioner remote -v
-git -C /Volumes/990p2t/workspace/tools/worktree-provisioner status --short --untracked-files=all
-find /Volumes/990p2t/workspace/tools/worktree-provisioner -maxdepth 4 -type f -print | sort
-```
-
-`rev-parse --verify HEAD` は no-commit repository なら failure が expected。unexpected commit / remote / unreviewed file があれば stop して scope を再評価する。
-
-5. decision record を owner と確定する。
-
-- `SEC-DEC-001`: remove force policy
-- `SEC-DEC-002`: automatic bootstrap default
-- `SEC-DEC-003`: namespace symlink create rejection
-- `POL-DEC-001`: legacy env support window
-- `PROD-DEC-001`: initial platform support
-
-### 3.3 Test-first checkpoint
-
-まだ production code を変更しない。decision table と baseline SHA が plan / issue に記録されていることを review する。
-
-### 3.4 Stop conditions
-
-- GitHub verified SHA と local parity source SHA が一致しない。
-- source baseline object が local repository にない。
-- destination に attachment 未掲載の重要 file / credentials / generated artifact がある。
-- remove / bootstrap / namespace symlink policy が未決定のまま該当 production code を書こうとしている。
-- source repository への変更が tool delivery scope に混入している。
-
-### 3.5 完了条件
-
-- baseline SHA が一意。
-- destination inventory が完全。
-- unresolved decision の owner / deadline / default assumption が明記される。
-- before-state evidence が保存される。
-
-## 4. Step P1 — Destination scaffold normalization
+## 4. P0 — Authority and baseline guard
 
 ### 4.1 目的
 
-prototype の packaging value を保持しつつ、create-only monolith を source-aligned bounded architecture に置換できる skeleton を作る。
+implementation task開始時のrepository revisionとprototype stateを確認し、stale specや別branchをsilent authorityにしない。
 
 ### 4.2 作業
 
-1. `pyproject.toml` を review し、次を維持する。
-   - `name = "worktree-provisioner"`
-   - `requires-python = ">=3.10"`
-   - Hatchling
-   - no runtime dependency
-   - `worktree-provisioner = "worktree_provisioner.cli:main"`
-2. dev dependency / tool config を追加する。
-   - `pytest`
-   - `ruff`
-   - `mypy`
-   - pytest marker `parity`
-3. package directory skeleton を作る。
-4. source MIT license notice を含む `LICENSE` を追加する。
-5. prototype `core.py` はまだ削除せず、new test harness が replacement path を通るまで freeze する。
-
-### 4.3 File ownership
-
-- owner workstream: `foundation`
-- files:
-  - `pyproject.toml`
-  - `LICENSE`
-  - package `__init__.py` / `__main__.py`
-  - empty package directories
-- 他 step は P1 完了まで `pyproject.toml` を変更しない。
-
-### 4.4 Checkpoint
-
 ```bash
-cd /Volumes/990p2t/workspace/tools/worktree-provisioner
-uv sync --all-groups
-uv run python -c 'import worktree_provisioner'
-uv run worktree-provisioner --help
+git rev-parse --show-toplevel
+git branch --show-current
+git rev-parse HEAD
+git status --short --untracked-files=all
+git remote -v
+find . -maxdepth 5 -type f -print | sort
 ```
 
-この時点の help は temporary でもよいが、prototype create-only contract を final として固定しない。
+判定:
 
-### 4.5 Stop conditions
+- current HEADがverified SHAそのもの、またはこの3文書を追加したreviewed descendantであることを確認する。
+- unrelated/unreviewed commitsがある場合はstopし、diffを再評価する。
+- root `AGENTS.md` が追加されている場合は最初に読む。baseline treeには存在しない。
+- secret、credential、generated build artifactをinventoryする。
+- prototype filesをaccepted architectureとして扱わない。
 
-- package import が sibling SpecDock path に依存する。
-- source file を copy したのに original MIT notice を失う。
-- hidden prototype file を確認せず削除する。
+### 4.3 Evidence
 
-### 4.6 完了条件
+- exact base SHA
+- current HEAD / branch
+- before `git status`
+- current tree inventory
+- owner decision source path
 
-- build backend / package discovery が機能する。
-- source / test layout が確定する。
-- no runtime dependency を維持する。
+### 4.4 Stop conditions
 
-## 5. Step P2 — Test harness and parity matrix first
+- repository/branchが違う。
+- verified SHAとのancestryを確認できない。
+- owner interviewがmissing/modifiedで、decision sourceを検証できない。
+- credentialsまたはunreviewed binary artifactがある。
+- SpecDock repositoryへのeditがimplementation scopeへ混入している。
+
+### 4.5 Gate `G0`
+
+- authority chainが一意。
+- implementation scopeがstandalone repoだけに限定される。
+- prototype replacement対象が明示される。
+
+## 5. P1 — Executable contract tests first
 
 ### 5.1 目的
 
-production copy より先に current behavior と intentional delta を executable test contract にする。
+owner-approved external contractをproduction rewriteより先にfailing testsとして固定する。SpecDockとの差分比較ではなく、functional coverageとsafety regressionを証明する。
 
-### 5.2 作業
+### 5.2 Test foundation
 
-1. `tests/conftest.py` に temp Git repository fixture を作る。
-2. fixture は必ず次を設定する。
-   - `git config gc.auto 0`
-   - `git config maintenance.auto false`
-   - local test user name / email
-   - initial tracked commit
-3. live source / destination repository に worktree を作らない。
-4. subprocess CLI helper は exact env mode を持ち、host の root env leakage を防ぐ。
-5. fake gateway helper を作り、retry / partial artifact / race を deterministic に再現する。
-6. parity scenario manifest を test data として定義する。
+`tests/conftest.py`またはfixture modulesで次を提供する。
+
+- temp Git repository
+- initial tracked commit
+- local user.name / user.email
+- `gc.auto=0`
+- `maintenance.auto=false`
+- exact environment runner
+- temp central root
+- symlink capability check
+- fake Git/Bootstrap/Filesystem gateways
+- subprocess CLI runner
+- no host `WORKTREE_PROVISIONER_ROOT` leakage
+- no host `SPEC_DOCK_WORKTREE_ROOT` influence
+
+live repositoryまたは標準実worktree rootをtest targetにしない。
+
+### 5.3 First failing tests
+
+1. top-level helpに4 commands
+2. `SPEC_DOCK_WORKTREE_ROOT` only => `root_required`
+3. basic create / naming
+4. linked normalization
+5. bootstrap failure => retained + exit `1` + JSON `partial`
+6. list managed/external
+7. show id/path/basename/ambiguity
+8. external remove blocked
+9. dirty default remove refusal / force success
+10. locked force blocked
+11. namespace symlink create/remove blocked
+12. JSON common envelope and stream cleanliness
+13. skill wrapper argv/exit propagation
+14. skill force authorization
+
+### 5.4 Scenario provenance manifest
+
+SpecDock test namesをcompatibility gateにせず、scenario provenanceとしてrecordする。
 
 ```python
 @dataclass(frozen=True)
-class ParityScenario:
-    id: str
-    source_test_symbols: tuple[str, ...]
+class ScenarioProvenance:
     requirement_ids: tuple[str, ...]
-    intentional_deltas: tuple[str, ...] = ()
+    reference_source: str
+    reference_symbols: tuple[str, ...]
+    intentional_changes: tuple[str, ...]
 ```
 
-### 5.3 最初に作る failing tests
+minimum reference groups:
 
-- basic create
-- invalid label no mutation
-- linked-worktree normalization
-- root missing / relative / file / broken symlink
-- bootstrap success / failed / detection_failed
-- non-retryable add failure no retry + artifact state
-- list / show JSON record payload
-- remove main/current/path_missing blockers
-- Git failure before cleanup
-- target-only cleanup
-- JSON envelope schema
+- create naming/collision/linked normalization
+- root validation
+- make init statuses
+- partial Git failure
+- worktree porcelain flags
+- stable target resolution
+- final refresh
+- Git-first cleanup
+- no-follow target cleanup
 
-### 5.4 Source test mapping baseline
-
-次の current source symbols を minimum parity source とする。
-
-#### Create
-
-- `test_worktree_create_requires_env_without_side_effects`
-- `test_worktree_create_rejects_blank_env_without_side_effects`
-- `test_worktree_create_uses_central_root_auto_id_and_branch`
-- `test_worktree_create_retries_collisions_and_accepts_label`
-- `test_worktree_create_retries_auto_id_collisions`
-- `test_worktree_create_retries_git_add_collision`
-- `test_worktree_create_uses_current_branch_with_slash_for_branch_prefix`
-- `test_worktree_create_normalizes_container_from_linked_worktree`
-- `test_worktree_create_rejects_relative_root_without_side_effects`
-- `test_worktree_create_rejects_file_root_without_side_effects`
-- `test_worktree_create_rejects_broken_symlink_root_without_side_effects`
-- `test_worktree_create_accepts_directory_symlink_root`
-- `test_worktree_create_expands_tilde_root`
-- `test_worktree_create_rejects_invalid_labels_without_creating_worktree`
-- `test_worktree_create_runs_make_init_when_available`
-- `test_worktree_create_keeps_worktree_when_make_init_fails`
-- `test_worktree_create_keeps_worktree_when_make_init_detection_fails`
-- `test_worktree_create_fails_from_detached_head`
-- `test_worktree_create_fails_outside_git_repo`
-- `test_worktree_create_fails_when_namespace_path_is_file`
-- `test_worktree_create_treats_non_collision_git_add_failure_as_fatal`
-
-#### Inventory / show
-
-- `test_worktree_record_payload_includes_classification_diagnostics`
-- `test_worktree_list_and_show_json_resolve_agent_targets`
-- `test_worktree_list_and_show_json_succeed_when_root_is_missing`
-- `test_worktree_json_commands_report_unavailable_classification_for_invalid_root_variants`
-- `test_worktree_list_json_classifies_unmanaged_worktree`
-- `test_worktree_invalid_root_reads_git_records_before_classification`
-- `test_worktree_inventory_reports_stale_records_and_duplicate_ids`
-- `test_worktree_target_resolver_boundary_preserves_selector_semantics`
-
-#### Remove
-
-- `test_worktree_remove_clean_managed_target_keeps_branch`
-- `test_worktree_remove_untracked_default_removes_directory_and_keeps_branch`
-- `test_worktree_remove_tracked_modification_default_removes_directory_and_keeps_branch`
-- `test_worktree_remove_force_compatibility_removes_dirty_directory`
-- `test_worktree_remove_locked_default_and_force_share_contract`
-- `test_worktree_remove_rejects_branch_target_and_invalid_root_without_side_effects`
-- `test_worktree_remove_rejects_main_and_delete_alias`
-- `test_worktree_remove_rejects_current_unmanaged_and_ambiguous_targets`
-- `test_worktree_remove_external_paths_are_not_blocked_by_managed_namespace_containment`
-- `test_worktree_remove_cleans_leftover_directory_and_reports_cleanup_failure`
-- `test_worktree_remove_git_failure_does_not_cleanup_target`
-- `test_worktree_remove_uses_target_only_cleanup_for_remaining_directory`
-- `test_worktree_remove_reports_target_cleanup_failures`
-- `test_worktree_remove_ambiguous_basename_stops_before_git_remove`
-- `test_worktree_remove_re_resolves_target_after_final_git_refresh`
-- `test_worktree_remove_hard_blockers_stop_before_git_remove_even_with_force`
-- `test_worktree_remove_treats_broken_symlink_target_as_existing`
-- `test_fs_remove_target_unlinks_symlink_broken_symlink_and_regular_file`
-- `test_fs_remove_target_reports_lstat_unlink_rmtree_and_unsupported_failures`
-
-### 5.5 Intentional delta test mapping
-
-- source default dirty remove success
-  - destination `remove --force` success と state parity を比較
-- destination default remove
-  - dirty / untracked で Git refusal、no cleanup を独立 safety test
-- source `origin=spec_dock_managed`
-  - destination `origin=managed_namespace` へ normalize
-- source create text only
-  - destination create JSON は independent schema test
-- destination `--no-bootstrap`
-  - source にない additive safety test
-- namespace symlink create
-  - current source behavior と分離し、destination は `invalid_root` で拒否する intentional safety test
-
-### 5.6 Verification
+### 5.5 Verification
 
 ```bash
-uv run pytest tests/contract -q
+uv run pytest tests/unit tests/integration -q
 ```
 
-この段階では failing expected。test names / assertions / fixtures が review 済みであることが gate。
+このphaseではfailureがexpectedだが、test reviewで次を確認する。
 
-### 5.7 Stop conditions
+- owner decisionを反映している。
+- legacy compatibility assertionがない。
+- SpecDock executableを必要としない。
+- real workspaceを変更しない。
 
-- test が live checkout / configured real worktree root を使う。
-- source behavior を current test symbol ではなく historical report の stale name から推測する。
-- force policy delta を parity failure として無視する。
-- fake adapter が production error classifier と異なる文字列だけで都合よく pass する。
+### 5.6 Stop conditions
 
-### 5.8 完了条件
+- behavior parityをpass criterionにする。
+- legacy env testをsuccessとして残す。
+- bootstrap failure exit `0` assertionを残す。
+- external remove success assertionを残す。
+- force no-op/double-force assertionを残す。
 
-- requirement AC ごとに test placeholder がある。
-- parity / intentional delta が区別される。
-- temp repo cleanup が `finally` / pytest fixture で保証される。
+### 5.7 Gate `G1`
 
-## 6. Step P3 — Contracts, ports, and infra extraction
+全`WTP-AC-*`にtest placeholderまたはtest mappingがある。
+
+## 6. P2 — Package and module scaffold normalization
 
 ### 6.1 目的
 
-source use case を受け入れる最小 contract / adapter foundation を production package に作る。
+packaging scaffoldの有用部分を残し、create-only monolithをbounded architectureへ移す。
 
-### 6.2 Ordered work
+### 6.2 Files
+
+- retain/review:
+  - `pyproject.toml`
+  - `LICENSE`
+  - `src/worktree_provisioner/__init__.py`
+  - `src/worktree_provisioner/__main__.py`
+- create:
+  - `application/`
+  - `infra/`
+  - `presentation/`
+  - `skills/worktree-provisioner/`
+  - split tests
+- freeze until replacement passes:
+  - prototype `core.py`
+  - prototype `cli.py`
+  - prototype `tests/test_cli.py`
+
+### 6.3 `pyproject.toml` changes
+
+- keep name/version/Python/Hatchling/entry point
+- add mypy
+- define Ruff formatting/lint
+- strict pytest markers if needed
+- include license files
+- no runtime Python dependencies
+- update description from create-only to full worktree lifecycle family
+
+### 6.4 Checkpoint
+
+```bash
+uv sync --all-groups
+uv run python -c 'import worktree_provisioner'
+uv run worktree-provisioner --version
+```
+
+### 6.5 Stop conditions
+
+- package importがSpecDock pathに依存する。
+- generic frameworkを先に作る。
+- prototypeをtestsなしで削除する。
+- machine-specific rootをdefault化する。
+
+### 6.6 Gate `G2`
+
+- package skeleton imports。
+- no runtime dependencies。
+- replacement pathが明示される。
+
+## 7. P3 — Contracts and adapters
+
+### 7.1 Ordered files
 
 1. `application/contracts.py`
 2. `application/ports.py`
 3. `infra/environment.py`
 4. `infra/git_cli.py`
 5. `infra/make_cli.py`
-6. `infra/fs_cli.py`
+6. `infra/filesystem.py`
 
-### 6.3 Test-first checkpoints
+### 7.2 Contract tests
 
-#### Contracts
+- enum values
+- response status
+- artifact nullability
+- record origin/blocker derivation
+- error object serialization
+- no mutable default fields
 
-- enum validation
-- `WorktreeRecordView` origin derivation
-- `ArtifactState` nullability
-- error object JSON-serializable field set
+### 7.3 Git parser tests
 
-#### Git parser
-
-- main / linked records
+- main + linked blocks
+- branch ref prefix removal
 - detached
 - bare
-- locked with / without reason
-- branch prefix removal
-- final block without trailing blank line
+- locked without reason
+- locked with reason
+- final block without blank line
+- malformed/no record response
 
-#### Git adapter
+### 7.4 Git adapter tests
 
-- argv exactness
-- stdout / stderr aggregation
-- missing Git
-- repo resolution from subdirectory / linked checkout
-- failed repo resolution
+Exact argv:
 
-#### Make adapter
+- `rev-parse --show-toplevel`
+- `rev-parse --abbrev-ref HEAD`
+- `show-ref --verify --quiet`
+- `check-ref-format --branch`
+- `worktree list --porcelain`
+- `worktree add -b`
+- remove default
+- remove single force
 
-- missing command
-- missing target variants
-- parse failure
-- success / failure
-- exact cwd
+Failures:
 
-#### Filesystem adapter
+- Git missing
+- repo path missing/file/outside/bare
+- stderr+stdout aggregation
+- subprocess OSError
 
-- directory
-- symlink
-- broken symlink
-- regular file
-- FIFO / unsupported
-- `lstat` / unlink / rmtree error
+### 7.5 Make adapter tests
 
-### 6.4 File ownership
+- no Makefile/no target -> skipped
+- make unavailable -> detection_failed
+- parse/include error -> detection_failed
+- success -> succeeded
+- command failure -> failed
+- exact created-worktree cwd
+- `--no-bootstrap` application branch does not call adapter
 
-| owner | files | rule |
-| --- | --- | --- |
-| `contracts` | `application/contracts.py`, `application/ports.py` | P3 中 single writer |
-| `git-adapter` | `infra/git_cli.py` | remote / checkout symbols を追加しない |
-| `bootstrap-adapter` | `infra/make_cli.py` | application policy を持たない |
-| `filesystem-adapter` | `infra/fs_cli.py` | Workbench code を copy しない |
-| `environment-adapter` | `infra/environment.py` | precedence policy を持たない |
+### 7.6 Filesystem tests
 
-### 6.5 Verification
+- no-follow existence for normal/broken symlink
+- directory creation
+- existing namespace directory
+- namespace symlink detection
+- directory/symlink/broken symlink/file cleanup
+- special file rejection
+- lstat/unlink/rmtree/permission/race errors
+
+### 7.7 Commands
 
 ```bash
-uv run pytest \
-  tests/contract/test_git_cli.py \
-  tests/contract/test_make_cli.py \
-  tests/contract/test_fs_cli.py \
-  -q
-uv run mypy src/worktree_provisioner/application src/worktree_provisioner/infra
+uv run pytest tests/unit/test_contracts.py tests/unit/test_git_porcelain.py \
+  tests/unit/test_make_cli.py tests/unit/test_filesystem.py -q
 uv run ruff check src/worktree_provisioner/application src/worktree_provisioner/infra
+uv run mypy src/worktree_provisioner/application src/worktree_provisioner/infra
 ```
 
-### 6.6 Stop conditions
+### 7.8 Stop conditions
 
-- `spec_dock_runtime` import が残る。
-- `GitGateway` に GitHub / checkout lifecycle methods を持ち込む。
-- `FilesystemGateway` に Workbench methods を持ち込む。
-- prototype parser を family parser として再利用する。
-- source error text を parse して domain state にする設計が adapter 外へ漏れる。
+- parserがdetached/bare/lockedを捨てる。
+- Git adapterがdouble forceまたはunlockを実行する。
+- environment adapterがlegacy envを読む。
+- filesystem adapterにWorkbench copy logicを持ち込む。
 
-### 6.7 完了条件
+### 7.9 Gate `G3`
 
-- adapter tests pass。
-- production modules は standalone import できる。
-- no SpecDock domain type。
+contracts/adaptersがstandaloneでpassし、production packageにSpecDock importがない。
 
-## 7. Step P4 — Create use case extraction
+## 8. P4 — Create and bootstrap partial semantics
 
-### 7.1 目的
+### 8.1 Ordered implementation
 
-SpecDock current create behavior を bounded copy し、standalone root / JSON error contract と bootstrap disable を加える。
+1. root selection
+2. label validation
+3. repo/current branch validation
+4. main record normalization
+5. namespace validation
+6. candidate generation
+7. preflight collision
+8. bounded retry
+9. Git add error classification
+10. artifact observation
+11. bootstrap disabled/skipped/succeeded
+12. bootstrap partial errors
 
-### 7.2 Ordered implementation
-
-1. label validation
-2. root selection / validation
-3. current branch validation
-4. main record / namespace normalization
-5. candidate generation
-6. preflight collision
-7. namespace mkdir
-8. Git add / retry classifier
-9. structured partial artifact state
-10. bootstrap aggregation
-
-### 7.3 Test-first checkpoints
-
-#### CP-C1: validation before mutation
+### 8.2 Test checkpoint `C1` — no mutation validation
 
 - invalid label
-- missing / blank / relative / file / broken symlink root
+- missing/blank root
+- legacy env only
+- relative/file/broken root
+- namespace file/symlink
 - detached HEAD
-- outside repo
+- repo outside
 
-assert:
+Assert:
 
 - no branch
-- no worktree record
+- no record
 - no target path
 - no bootstrap marker
 
-#### CP-C2: naming
+### 8.3 Test checkpoint `C2` — naming/collision
 
-- auto ids
-- label ids
+- `wt1`, `wt2`
+- label, label2
 - current branch containing `/`
-- ref invalid after composition
+- directory-only/branch-only/record-only collision
+- retryable add collision
+- invalid generated ref
 - candidate ceiling
+- unknown failure no retry
 
-#### CP-C3: collision
+### 8.4 Test checkpoint `C3` — linked normalization
 
-- directory collision
-- branch collision
-- record collision
-- retryable Git collision
-- unknown Git failure no retry
-
-#### CP-C4: linked normalization
-
-- invocation from linked checkout
-- main basename namespace
-- invocation branch prefix
+- main worktree basename drives namespace
+- invocation linked branch drives new branch
 - no chained name
 
-#### CP-C5: partial artifacts
+### 8.5 Test checkpoint `C4` — bootstrap
 
-fake adapter cases:
+| case | expected status | response | exit |
+| --- | --- | --- | ---: |
+| `--no-bootstrap` | disabled | ok | 0 |
+| no target | skipped | ok | 0 |
+| success | succeeded | ok | 0 |
+| make missing | detection_failed | partial | 1 |
+| parse failure | detection_failed | partial | 1 |
+| command non-zero | failed | partial | 1 |
 
-- branch created, record absent, path absent
-- path created, record absent
-- record visible after failure
-- branch existence lookup unavailable
-- record refresh failure
+全partial caseでworktree/branch/recordを保持し、rollback call count `0`。
 
-assert structured `ArtifactState` and no automatic cleanup.
+### 8.6 Test checkpoint `C5` — Git partial state
 
-#### CP-C6: bootstrap
+fake cases:
 
-- disabled
-- skipped
-- succeeded
-- failed
-- detection_failed
-- warnings / exit 0
+- branch only
+- path only
+- record only
+- branch + path
+- record refresh unavailable
+- branch inspection unavailable
 
-### 7.4 File ownership
+Error fields:
 
-- owner: `create-use-case`
-- files:
-  - `application/worktree.py` create section / shared root helpers
-  - `tests/contract/test_create.py`
-  - `tests/integration/test_cli_create.py` only after P7 wiring; until then application tests
-- inventory / remove sections may be skeleton only; no parallel edits in same file。
+- attempted id/path/branch
+- artifacts with true/false/null
+- no cleanup
 
-### 7.5 Verification
+### 8.7 Verification
 
 ```bash
-uv run pytest tests/contract/test_create.py -q
-uv run ruff check src/worktree_provisioner/application/worktree.py tests/contract/test_create.py
-uv run mypy src/worktree_provisioner/application/worktree.py
+uv run pytest tests/unit/test_root_and_naming.py tests/unit/test_create.py \
+  tests/integration/test_cli_create.py -q
 ```
 
-### 7.6 Stop conditions
+### 8.8 Stop conditions
 
-- unknown Git message を collision retry に含める。
-- partial failure を success result にする。
-- bootstrap failure で worktree を cleanup する。
-- root missing で sibling placement へ fallback する。
-- linked checkout basename を namespace として使う。
+- missing rootでsibling placementへfallbackする。
+- legacy envを使う。
+- bootstrap failureをexit `0`にする。
+- partial resultからabsolute pathを落とす。
+- unknown Git errorをretryする。
 
-### 7.7 完了条件
+### 8.9 Gate `G4`
 
-- WP-AC-001..007 の application-level tests pass。
-- create does not import CLI / presentation。
-- artifact state is structured。
+`WTP-AC-002`〜`WTP-AC-007`がpass。
 
-## 8. Step P5 — Inventory, show, and target resolution
+## 9. P5 — List/show inventory and target resolver
 
-### 8.1 目的
+### 9.1 Ordered implementation
 
-root-independent Git inventory と agent-safe target resolution を移植する。
+1. Git list error conversion
+2. main/current identification
+3. namespace classification context
+4. lexical+canonical managed containment
+5. blocker calculation
+6. raw/stable id generation
+7. list result
+8. target resolver
+9. show result
 
-### 8.2 Ordered implementation
-
-1. `_git_worktree_list` error conversion
-2. main / current identification
-3. root classification context
-4. managed containment
-5. raw / stable id generation
-6. `WorktreeRecordView`
-7. `worktree_list`
-8. `resolve_worktree_target`
-9. `worktree_show`
-
-### 8.3 Test-first checkpoints
-
-#### CP-I1: classification
-
-- root valid
-- root missing
-- root blank
-- env invalid
-- explicit root invalid fatal
-- namespace symlink
-- directory symlink root
-- managed / external
-
-#### CP-I2: record attributes
-
-- detached / bare / locked retained
-- stale path
-- current / main flags
-- `record_exists=true`
-
-#### CP-I3: stable ids
+### 9.2 Inventory matrix
 
 - main
-- managed suffix
-- external basename
-- duplicate `~2`
-- output order unchanged
+- managed
+- external
+- detached
+- bare
+- locked + reason
+- stale path
+- duplicate raw id
+- missing namespace
+- namespace symlink classification unavailable
 
-#### CP-I4: target resolution
+### 9.3 Expected blockers
 
-- id
+- main/current/bare/locked/path_missing
+- outside_managed_namespace
+- classification_unavailable
+
+external recordはlist/show successでobservable、`removable=false`。
+
+### 9.4 Target tests
+
+- exact id
 - absolute path
 - basename
-- id priority over ambiguous basename
+- id priority over basename ambiguity
+- deterministic `~2`
 - ambiguous candidates
-- unsupported branch
+- branch rejection
 - not found
 
-### 8.4 File ownership
-
-- owner: `inventory-use-case`
-- files:
-  - `application/worktree.py` inventory section
-  - `application/worktree_target.py`
-  - `tests/contract/test_inventory.py`
-  - `tests/contract/test_target.py`
-
-P4 owner から `application/worktree.py` の ownership handoff を明示してから開始する。
-
-### 8.5 Verification
+### 9.5 Verification
 
 ```bash
-uv run pytest \
-  tests/contract/test_inventory.py \
-  tests/contract/test_target.py \
-  -q
+uv run pytest tests/unit/test_inventory.py tests/unit/test_target_resolver.py \
+  tests/integration/test_cli_list_show.py -q
 ```
 
-### 8.6 Stop conditions
+### 9.6 Stop conditions
 
-- missing / invalid env root を list blocker にする。
-- `managed=false` と classification unavailable を同一意味にする。
-- branch name を target として許可する。
-- duplicate basename を first match で選ぶ。
-- configured namespace を creation proof と説明する。
+- externalをinventoryから除外する。
+- externalをremovableにする。
+- branch selectorを許可する。
+- duplicate basenameをfirst matchで選ぶ。
+- managedをcreation provenanceと説明する。
 
-### 8.7 完了条件
+### 9.7 Gate `G5`
 
-- WP-AC-008 / WP-AC-009 application tests pass。
-- root unavailable でも Git inventory が返る。
-- candidate payload に同じ record schema が使われる。
+`WTP-AC-008`, `WTP-AC-009`がpass。
 
-## 9. Step P6 — Remove, containment, and cleanup
+## 10. P6 — Managed-only remove and cleanup
 
-### 9.1 目的
+### 10.1 Ordered implementation
 
-最も destructive な operation を hard blockers、final refresh、Git-first、target-only cleanup で実装する。
+1. namespace safety preflight
+2. initial inventory/resolve
+3. hard blocker evaluation
+4. final Git inventory refresh
+5. target re-resolution
+6. canonical identity check
+7. blocker re-evaluation
+8. protected path / containment check
+9. Git remove default/single force
+10. post-Git containment recheck
+11. target-only no-follow cleanup
+12. partial cleanup result
 
-### 9.2 Ordered implementation
+### 10.2 Test checkpoint `R1` — hard blockers × force
 
-1. blocker calculation
-2. non-bypassable blocker filter
-3. protected path set
-4. containment guard
-5. initial target resolution
-6. final Git record refresh
-7. re-resolution / canonical identity check
-8. Git remove policy
-9. post-Git containment re-check
-10. target-only cleanup
-11. partial remove result / error
-
-### 9.3 Test-first checkpoints
-
-#### CP-R1: pre-mutation blockers
-
-matrix × `force in {False, True}`:
+各caseを `force=False/True` で検証する。
 
 - main
 - current
 - bare
+- locked
 - path missing
+- external
+- classification unavailable
+- namespace symlink
+- root/namespace/protected ancestor
 - record missing after refresh
-- protected central root
-- protected namespace
-- ancestor containing root / namespace
-- namespace symlink lexical path
+- target changed after refresh
 
-assert Git remove call count `0`.
+Git remove call countは`0`。
 
-#### CP-R2: external eligibility
+### 10.3 Test checkpoint `R2` — force semantics
 
-- external unmanaged worktree
-- invalid / missing classification root
-- branch retained
+- clean managed default success
+- dirty/untracked managed default Git refusal
+- 同じtargetのexplicit force success
+- argvにforceなし / single force
+- double forceなし
+- unlock commandなし
+- branch remains
 
-#### CP-R3: target races
+### 10.4 Test checkpoint `R3` — final refresh races
 
-- target disappears after initial inventory
-- target path changes
-- target becomes bare
-- basename becomes ambiguous
+- target disappears
+- stable id now points elsewhere
+- new duplicate ambiguity
+- target becomes bare/locked/current
+- namespace changes to symlink
 
-assert no wrong-path remove。
+wrong pathへのremove callは`0`。
 
-#### CP-R4: Git-first
+### 10.5 Test checkpoint `R4` — Git-first
 
-- Git failure -> no `path_exists` / `remove_target` call
-- default dirty target -> Git refusal / no cleanup
-- `--force` dirty target -> success
-- locked target -> refusal under provisional policy
+- Git remove failure -> filesystem gateway call `0`
+- no cleanup before Git success
+- surfaced Git error is bounded/redacted
 
-#### CP-R5: cleanup
+### 10.6 Test checkpoint `R5` — cleanup
 
 - leftover directory
 - symlink
 - broken symlink
 - regular file
-- unsupported type
-- lstat error
-- unlink error
-- rmtree error
-- path disappears race
+- special file
+- lstat race
+- unlink/rmtree permission
+- target disappears after Git success
 
-assert parent / root / namespace sentinel remains。
+parent/root/namespace/main sentinelsが残る。
 
-#### CP-R6: partial remove
+### 10.7 Partial cleanup assertion
 
-Git record removed + cleanup failure:
-
-- error code `post_remove_cleanup_failed`
+- exit `1`
+- status `partial`
+- code `post_remove_cleanup_failed`
 - `removed_record=true`
 - `removed_directory=false`
-- branch remains
+- `branch_deleted=false`
 
-### 9.4 File ownership
-
-- owner: `remove-use-case`
-- files:
-  - `application/worktree.py` remove section / containment helpers
-  - `infra/git_cli.py` remove force branch only via adapter owner review
-  - `infra/fs_cli.py` only bug fix via adapter owner review
-  - `tests/contract/test_remove.py`
-
-### 9.5 Verification
+### 10.8 Verification
 
 ```bash
-uv run pytest tests/contract/test_remove.py -q
+uv run pytest tests/unit/test_remove.py tests/unit/test_filesystem.py \
+  tests/integration/test_cli_remove.py -q
 ```
 
-### 9.6 Stop conditions
+### 10.9 Stop conditions
 
-- `req.force` を無視する。
-- current SpecDock の unconditional double force を owner approval なしで copy する。
-- `managed=false` を blocker にする。
-- Git failure 後に cleanup する。
-- branch を削除する。
-- `git worktree prune` を呼ぶ。
-- target parent / namespace を削除する。
-- symlink target を follow する。
+- external targetを削除する。
+- `req.force`を無視する。
+- lockedをGitへ渡す。
+- Git failure後にcleanupする。
+- branch deletion/prune/repairを呼ぶ。
+- parent/namespace/rootをcleanupする。
 
-### 9.7 完了条件
+### 10.10 Gate `G6`
 
-- WP-AC-010 / WP-AC-011 pass。
-- destructive path tests all pass。
-- source parity delta is documented。
+`WTP-AC-010`〜`WTP-AC-012`がpass。
 
-## 10. Step P7 — CLI, presentation, and JSON contract
+## 11. P7 — CLI, text, and JSON schema v1
 
-### 10.1 目的
+### 11.1 Parser/dispatch
 
-family 全体を standalone command として公開し、human / agent interfaces を固定する。
+- 4 subcommands
+- shared `--repo`, `--root`, `--json`
+- create `--no-bootstrap`
+- remove `--force`
+- no `delete`
+- `--version`
+- custom JSON usage error path
 
-### 10.2 Ordered implementation
+### 11.2 JSON builders
 
-1. parser / subcommands
-2. shared options
-3. request construction
-4. concrete Ports wiring
-5. text renderers
-6. JSON payload builders
-7. expected error rendering
-8. stdout / stderr / exit code
-9. `--version`
+explicit field mappingを使用し、`dataclasses.asdict`任せのPath変換にしない。
 
-### 10.3 Test-first checkpoints
+Tests:
 
-#### CP-CLI1: help / usage
+- common fields always present
+- ok/partial/error nullability
+- schema version integer 1
+- operation enum
+- path absolute string
+- booleans typed
+- null unknown artifacts
+- warning objects
+- one document only
+- expected JSON stderr empty
 
-- top-level help lists four commands
-- each help has exact options
-- no `delete` alias
-- usage error exit `2`
+### 11.3 Error code coverage
 
-#### CP-CLI2: text
+`WTP-RQ-017` の各error codeに最低1つのcontract testを置く。message wordingはsnapshot固定せず、code/details typesを固定する。
 
-- absolute paths
+### 11.4 Text tests
+
+- default text
 - product prefix
-- bootstrap warning stderr
-- fatal error stderr
+- absolute path
+- complete success stdout
+- partial result stdout + error stderr
+- exit code mapping
 
-#### CP-CLI3: JSON
+### 11.5 Prototype replacement point
 
-for every operation:
+P4-P7 test pass後にのみ次を行う。
 
-- success schema
-- expected error schema
-- exactly one stdout document
-- no human stderr for expected JSON response
-- `schema_version=1`
-- correct `operation`
-- `result XOR error`
-- path types strings
-- boolean types booleans
-- `null` consistency
+- prototype `core.py`を削除
+- prototype `cli.py`をfinal composition rootへ置換
+- prototype `tests/test_cli.py`をsplit testsへ置換
+- unique scenarioが新suiteに存在することを確認
+- `legacy/` copyを作らない
 
-#### CP-CLI4: stable codes
-
-- every WP-RQ-017 code has at least one test
-- message wording is not snapshot-stable
-- code / field type is snapshot-stable
-
-### 10.4 File ownership
-
-- owner: `cli-presentation`
-- files:
-  - `src/worktree_provisioner/cli.py`
-  - `src/worktree_provisioner/presentation/cli_text.py`
-  - `tests/contract/test_json_schema.py`
-  - `tests/integration/test_cli_create.py`
-  - `tests/integration/test_cli_inventory.py`
-  - `tests/integration/test_cli_remove.py`
-
-### 10.5 Prototype replacement point
-
-P7 tests が pass した後にのみ次を行う。
-
-- prototype `core.py` を削除
-- prototype `cli.py` を final implementation に置換
-- prototype `tests/test_cli.py` の unique scenario が新 tests に存在することを確認してから削除 / split
-
-### 10.6 Verification
+### 11.6 Verification
 
 ```bash
-uv run pytest tests/contract/test_json_schema.py tests/integration -q
+uv run pytest tests/unit/test_json_v1.py tests/integration -q
 uv run worktree-provisioner --help
 uv run worktree-provisioner create --help
 uv run worktree-provisioner list --help
@@ -793,73 +678,164 @@ uv run worktree-provisioner show --help
 uv run worktree-provisioner remove --help
 ```
 
-### 10.7 Stop conditions
+### 11.7 Stop conditions
 
-- JSON error を stderr text だけで返す。
-- JSON success stdout に warning text を追記する。
-- `dataclasses.asdict` で Path serialization を偶然に依存する。
-- command registry / broad UseCases framework を再導入する。
-- create-only README / help が残る。
+- JSON expected errorをstderr textだけで返す。
+- JSON stdoutにhuman linesを追加する。
+- bootstrap partialをstatus error/okに誤分類する。
+- create-only helpが残る。
 
-### 10.8 完了条件
+### 11.8 Gate `G7`
 
-- WP-AC-012 pass。
-- all four commands are callable。
-- prototype monolith is gone。
+`WTP-AC-013`, `WTP-AC-014`, `WTP-AC-019`がpass。
 
-## 11. Step P8 — Documentation, compatibility, packaging, and license
+## 12. P8 — Codex skill and thin wrapper
 
-### 11.1 目的
+### 12.1 Deliverables
 
-implementation contract を operator / agent / maintainer が再検証でき、installed artifact が independent に動く状態にする。
+```text
+skills/worktree-provisioner/SKILL.md
+skills/worktree-provisioner/scripts/worktree-provisioner
+```
 
-### 11.2 README requirements
+### 12.2 Wrapper implementation
 
-README は少なくとも次を含む。
+- `command -v worktree-provisioner`
+- missing -> stderr + exit 127
+- otherwise `exec worktree-provisioner "$@"`
+- no business logic
 
-- purpose / scope
-- four command examples
-- `--repo` / `--root`
-- env precedence
-- layout / naming
-- linked-worktree normalization
-- bootstrap trust warning / `--no-bootstrap`
-- JSON interface
-- remove safety / force policy
-- branch retention
-- non-scope
-- development / verification commands
+### 12.3 Wrapper tests
 
-### 11.3 `docs/compatibility.md`
+fake executableで:
 
-- baseline SHA
-- SpecDock -> new CLI mapping
-- env migration
-- JSON origin mapping
-- intentional force delta
-- legacy env deprecation window
-- existing worktree non-migration
+- argv exactness
+- stdout propagation
+- stderr propagation
+- exit 0/1/2 propagation
+- arguments with spaces/metacharacters remain one argv element
+- no root injection
+- no JSON modification
 
-### 11.4 `docs/safety.md`
+Static check:
 
-- mutation boundaries
-- retry classifier
-- partial artifacts / no auto cleanup
-- bootstrap code execution
-- remove hard blockers
-- Git-first / target-only cleanup
-- symlink behavior
-- no secrets / no remote
+- `git`, `make`, `WORKTREE_PROVISIONER_ROOT`, target resolver codeがwrapperにない。
 
-### 11.5 Packaging
+### 12.4 Skill behavior tests/review cases
 
-- root `LICENSE`
-- wheel / sdist
-- no package data from SpecDock
-- version `0.1.0` until publication policy changes
-- no remote metadata assumed
+#### Create
 
-### 11.6 Verification
+- explicit “このrepoでworktreeを作成” -> fact check + create
+- explicit create without label -> auto-id; no unnecessary clarification
+- ambiguous “worktreeを用意して” with repo unclear -> clarification; no execution
+- create partial -> report retained path/branch/bootstrap failure
+- create success -> id/branch/path/bootstrap only; no task lifecycle call
+
+#### Remove
+
+- explicit target remove -> show then remove
+- ambiguous basename -> stop
+- blocker/external -> stop
+- force not mentioned -> no `--force`
+- explicit force intent -> `--force` exactly once
+- locked -> report manual `git worktree unlock` requirement; do not execute remove
+
+### 12.5 Verification
+
+```bash
+uv run pytest tests/integration/test_skill_wrapper.py -q
+shellcheck skills/worktree-provisioner/scripts/worktree-provisioner  # available時
+```
+
+SKILL.mdはmanual reviewer checklistも通す。
+
+### 12.6 Stop conditions
+
+- skill/wrapperにGit commandsを実装する。
+- wrapperがhard-coded rootを注入する。
+- skillがtext parsingする。
+- force intentを推測する。
+- create後にCodex taskを作成/移動する。
+
+### 12.7 Gate `G8`
+
+`WTP-AC-015`〜`WTP-AC-017`がpass。
+
+## 13. P9 — Documentation, packaging, installation, CI
+
+### 13.1 README rewrite
+
+最低限含める。
+
+- purpose and 4-command scope
+- human/agent interfaces
+- root config and no legacy env
+- standard local env example（hard-coded defaultではない）
+- layout/naming/linked normalization
+- automatic bootstrap trust warning / `--no-bootstrap`
+- partial + exit `1`
+- managed-only remove
+- force/locked policy
+- JSON schema link/summary
+- skill install/use boundary
+- unsupported scope/platform
+- dev verification
+
+### 13.2 Packaging
+
+- descriptionを4-command productへ更新
+- mypy/dev tools
+- license file inclusion
+- wheel/sdist
+- no Python runtime deps
+- skill sourceのdistribution方法をREADMEに記載
+
+### 13.3 CI
+
+GitHub Actions matrix:
+
+- Linux supported Python versions
+- macOS supported Python versions
+- Ruff format/check
+- Mypy
+- Pytest
+- build
+- installed wheel smoke
+
+Windows jobはrequiredにしない。
+
+### 13.4 Installation smoke
+
+```bash
+uv build
+
+tmp_venv="$(mktemp -d)/venv"
+python3 -m venv "$tmp_venv"
+"$tmp_venv/bin/pip" install dist/worktree_provisioner-*.whl
+PATH="$tmp_venv/bin:$PATH" worktree-provisioner --help
+PATH="$tmp_venv/bin:$PATH" worktree-provisioner --version
+```
+
+public repositoryのtag/exact SHAからの`uv tool install` smokeを別test/scriptで検証してよい。package index publicationは要求しない。
+
+### 13.5 Static scope checks
+
+```bash
+! rg -n 'spec_dock_runtime' src/worktree_provisioner
+! rg -n 'SPEC_DOCK_WORKTREE_ROOT' src/worktree_provisioner
+! rg -n '/Volumes/990p2t/workspace/worktrees' src/worktree_provisioner
+! rg -n 'worktree (status|prune|repair)|branch delete|github issue|workbench' src/worktree_provisioner
+```
+
+README内のstandard local path exampleは許容する。
+
+### 13.6 Gate `G9`
+
+`WTP-AC-001`, `WTP-AC-018`, `WTP-AC-020`がpass。
+
+## 14. P10 — Full verification and handoff
+
+### 14.1 Full commands
 
 ```bash
 uv run ruff format --check .
@@ -867,401 +843,245 @@ uv run ruff check .
 uv run mypy src tests
 uv run pytest -q
 uv build
+git diff --check
 ```
 
-wheel install smoke:
+Installed artifact smokeとmacOS/Linux evidenceを添付する。
+
+### 14.2 Safety audit checklist
+
+- [ ] legacy env lookupなし
+- [ ] machine root defaultなし
+- [ ] namespace symlink create/remove拒否
+- [ ] external remove拒否
+- [ ] locked force拒否
+- [ ] default remove non-force
+- [ ] single forceのみ
+- [ ] final refreshあり
+- [ ] Git failure後cleanupなし
+- [ ] target-only no-follow cleanup
+- [ ] branch deletionなし
+- [ ] bootstrap failure partial/non-zero/no rollback
+- [ ] JSON one-document contract
+- [ ] skill wrapper thin
+- [ ] force authorization explicit
+- [ ] no task lifecycle mutation
+- [ ] no SpecDock edits
+
+### 14.3 Handoff evidence
+
+- base SHA / implementation HEAD
+- changed file list
+- test/lint/type/build commands and results
+- macOS/Linux evidence
+- wheel/sdist filenames and SHA-256
+- installed CLI smoke
+- skill wrapper tests
+- JSON schema samples
+- prototype removal evidence
+- final `git status`
+- known implementation-level limitations
+
+### 14.4 Commit/publication boundary
+
+本計画はcommit/push/release authorityを自動的に付与しない。implementation taskの具体的なauthorizationに従う。
+
+Repositoryは既にpublicであるが、次は別の明示authorityを必要とする。
+
+- package registry publication
+- tag/release creation
+- protected branch setting変更
+- external service deployment
+
+### 14.5 Completion criteria
+
+全`WTP-AC-001`〜`WTP-AC-020`と`G0`〜`G9`がpassし、P10 handoff evidenceが揃った時点でstandalone product implementationをcomplete候補とする。
+
+## 15. File ownership matrix
+
+| Path | Primary phase/owner | Later writers | Constraint |
+| --- | --- | --- | --- |
+| `pyproject.toml` | P2 foundation | P9 packaging | no runtime deps / no legacy config |
+| `LICENSE` | P2 foundation | none without policy review | include in artifacts |
+| `src/worktree_provisioner/cli.py` | P7 CLI | P9 help/version | composition root only |
+| `application/contracts.py` | P3 contracts | P4-P7 via owner review | JSON-facing types stable |
+| `application/ports.py` | P3 contracts | adapter change review | worktree-only protocols |
+| `application/worktree_service.py` | P4 create | P5 then P6 sequential handoff | no parallel writers |
+| `application/target_resolver.py` | P5 inventory | P6 bug fixes | pure resolver |
+| `infra/environment.py` | P3 | P4 root fixes | no legacy env |
+| `infra/git_cli.py` | P3 | P6 remove argv review | no remote/GitHub functions |
+| `infra/make_cli.py` | P3 | P4 bootstrap fixes | no rollback policy |
+| `infra/filesystem.py` | P3 | P6 cleanup fixes | no Workbench logic |
+| `presentation/json_v1.py` | P7 | schema review only | explicit mapping |
+| `presentation/text.py` | P7 | P9 help/docs consistency | wording not machine contract |
+| `skills/.../SKILL.md` | P8 skill | P9 docs consistency | authorization boundary |
+| `skills/.../scripts/worktree-provisioner` | P8 wrapper | none except portability | thin exec only |
+| `tests/unit/test_create.py` | P4 | P10 hardening | partial semantics |
+| `tests/unit/test_inventory.py` | P5 | P10 | external observable |
+| `tests/unit/test_remove.py` | P6 | P10 | destructive safety |
+| `tests/unit/test_json_v1.py` | P7 | schema change review | field/type lock |
+| `tests/integration/test_skill_wrapper.py` | P8 | P10 | argv/auth flows |
+| `README.md` | P9 | P10 corrections | no stale prototype text |
+| `.github/workflows/ci.yml` | P9 | P10 | macOS/Linux |
+
+## 16. Quality gates
+
+| Gate | Required evidence |
+| --- | --- |
+| `G0 Authority` | exact repo/branch/SHA ancestry、owner interview、tree inventory |
+| `G1 Contract` | all AC mapped to tests; no legacy/parity assumptions |
+| `G2 Scaffold` | package imports、tool config、no hard-coded root |
+| `G3 Adapters` | Git/make/fs/env tests、single force、no SpecDock import |
+| `G4 Create` | naming/root/linked/collision/bootstrap partial/artifacts |
+| `G5 Inventory` | managed/external/flags/stable ids/target resolver |
+| `G6 Remove` | managed-only、locked、force、refresh、Git-first、cleanup partial |
+| `G7 Interface` | text/JSON/exit/schema/error-code coverage |
+| `G8 Skill` | explicit intent、show-before-remove、force intent、thin wrapper |
+| `G9 Distribution` | lint/type/tests/build/install/macOS/Linux/docs/scope checks |
+
+## 17. Traceability tables
+
+### 17.1 Owner decisions
+
+| Owner decision | Requirement / design expression | Implementation phase | Evidence |
+| --- | --- | --- | --- |
+| `OD-001` | `WTP-RQ-002`; Design §4, §8 | P2, P7 | four-command help and integration suite |
+| `OD-002`, `OD-003` | `WTP-RQ-014`, `WTP-RQ-015`; Design §14-15 | P7 | default text and explicit JSON tests |
+| `OD-004` | `WTP-RQ-021`; Design §18, §21 | P1, P9 | no compatibility/parity gate; provenance-only review |
+| `OD-005` | `WTP-RQ-004`; Design §9.1 | P3, P4 | legacy env only => `root_required`; production-source grep |
+| `OD-006` | `WTP-RQ-004`; Design §9, §17 | P9 | no machine path in source; README operational example review |
+| `OD-007` | `WTP-RQ-006`, `WTP-RQ-007`; Design §10.1-10.2 | P4 | auto/label/collision/ref tests |
+| `OD-008` | `WTP-RQ-009`; Design §11 | P3, P4 | disabled/skipped/succeeded bootstrap tests |
+| `OD-009` | `WTP-RQ-009`, `WTP-RQ-015`, `WTP-RQ-016`; Design §11.2, §14 | P4, P7 | partial JSON, exit 1, retained artifacts, no rollback |
+| `OD-010` | `WTP-RQ-020`; Design §17.3 | P9, P10 | macOS/Linux CI and install evidence |
+| `OD-011` | `WTP-RQ-013`; Design §13.3 | P6 | dirty default refusal; argv without force |
+| `OD-012` | `WTP-RQ-012`, `WTP-RQ-013`; Design §12.3, §13.2 | P5, P6 | locked blocker × force; no Git mutation |
+| `OD-013` | `WTP-RQ-010`, `WTP-RQ-012`; Design §12-13 | P5, P6 | external list/show success; external remove blocked |
+| `OD-014` | `WTP-RQ-005`, `WTP-RQ-012`; Design §9.2, §13.2 | P4-P6 | create/remove reject; list/show classification unavailable |
+| `OD-015` | `WTP-RQ-018`; Design §16.3 | P8 | explicit vs ambiguous create skill cases |
+| `OD-016` | `WTP-RQ-018`; Design §16.4 | P8 | show-before-remove; explicit-force-only skill cases |
+| `OD-017` | `WTP-RQ-018`; Design §16.2 | P8 | fake PATH argv/stdout/stderr/exit propagation |
+| `OD-018` | `WTP-RQ-018`; Design §16.3-16.5 | P8 | result report fields; no Codex lifecycle call |
+| `OD-019` | planning status and Plan §1 | P0-P10 | proposed status; no implementation-complete claim |
+| `OD-020` | `WTP-AC-020`; Design `INV-018`; Plan scope | all | repository/path scope review; no SpecDock phase |
+| `OD-021` | `WTP-RQ-001`; document metadata, Design §17 | P0, P9 | repository/package identity checks |
+
+### 17.2 Functional and non-functional requirements
+
+| Requirement | Design section / decision | Implementation phase | Proving tests / evidence |
+| --- | --- | --- | --- |
+| `WTP-RQ-001` product identity/independence | Design §4-5, §17 | P2, P9 | package metadata, no `spec_dock_runtime`, installed CLI |
+| `WTP-RQ-002` command family | Design §8 | P7 | top-level/leaf help, no `delete` alias |
+| `WTP-RQ-003` repository resolution | Design §7.1, §8 | P3, P4 | subdirectory, outside repo, missing/file, bare, detached tests |
+| `WTP-RQ-004` root configuration | Design §9.1 | P3, P4 | precedence, missing/blank, legacy-variable-negative tests |
+| `WTP-RQ-005` root/namespace validation | Design §9.2-9.3 | P4-P6 | root matrix, namespace type/symlink, containment tests |
+| `WTP-RQ-006` layout/naming | Design §10.1 | P4 | auto/label/branch-slash/linked-normalization tests |
+| `WTP-RQ-007` collision/retry | Design §10.1-10.2 | P4 | path/branch/record/retryable/unknown/ceiling tests |
+| `WTP-RQ-008` create artifacts | Design §10.3 | P4, P7 | fake partial-state matrix and JSON nullability |
+| `WTP-RQ-009` bootstrap | Design §11 | P3, P4, P7 | disabled/skipped/succeeded/detection_failed/failed matrix |
+| `WTP-RQ-010` inventory | Design §12.1-12.3 | P5 | main/managed/external/detached/bare/locked/stale records |
+| `WTP-RQ-011` target resolution | Design §12.4 | P5 | id/path/basename/duplicate/ambiguity/branch/not-found tests |
+| `WTP-RQ-012` remove eligibility | Design §12.3, §13.1-13.2 | P5, P6 | blocker × force matrix, external and unsafe namespace tests |
+| `WTP-RQ-013` remove execution | Design §13.1, §13.3-13.5 | P6 | default/single-force argv, refresh, Git-first, cleanup partial |
+| `WTP-RQ-014` human text | Design §15 | P7 | default mode, streams, prefix, absolute path, partial text |
+| `WTP-RQ-015` JSON | Design §14 | P7 | schema-v1 ok/partial/error, one-document and type tests |
+| `WTP-RQ-016` exit codes | Design §11, §13.5, §15 | P4, P6, P7 | exit 0/1/2 matrix |
+| `WTP-RQ-017` codes/blockers | Design §6.7, §12.3, §14.5 | P4-P7 | at least one contract test per code/blocker |
+| `WTP-RQ-018` skill/wrapper | Design §16 | P8 | intent, authorization, wrapper thinness and propagation tests |
+| `WTP-RQ-019` packaging/install | Design §17 | P2, P9 | wheel/sdist, clean venv/uv-tool smoke, license inspection |
+| `WTP-RQ-020` platform support | Design §17.3 | P9, P10 | macOS/Linux CI; Windows not advertised |
+| `WTP-RQ-021` compatibility/provenance | Design §18, §21 | P1, P9 | scenario provenance; no differential parity/legacy support |
+| `WTP-RQ-022` prototype disposition | Design §18, §21 | P2, P7, P9 | no create-only monolith/legacy behavior/dead copy |
+| `WTP-NFR-001` safety | Design §19 invariants | P3-P10 | destructive matrix, subprocess/symlink/static audit |
+| `WTP-NFR-002` observability | Design §6, §11, §13.5, §14 | P4, P6, P7 | artifacts/partial/remove-state JSON tests |
+| `WTP-NFR-003` maintainability | Design §4-5, §18 | P2-P9 | Ruff/Mypy/Pytest, worktree-only boundaries |
+| `WTP-NFR-004` determinism | Design §12.2, §14 | P5, P7 | stable-id determinism and schema type tests |
+| `WTP-NFR-005` performance | Design §10, §12, §13 | P4-P6 | bounded candidate and gateway call-count assertions |
+
+### 17.3 Acceptance criteria
+
+| Acceptance criterion | Design basis | Implementation phase | Concrete proof |
+| --- | --- | --- | --- |
+| `WTP-AC-001` package identity | Design §5, §17 | P2, P9 | installed package/help/version/no SpecDock import |
+| `WTP-AC-002` basic create | Design §10-11 | P4, P7 | temp repo create text/JSON integration |
+| `WTP-AC-003` label/collision | Design §10.1-10.2 | P4 | parametrized label and all collision classes |
+| `WTP-AC-004` linked normalization | Design §9, §10 | P4 | linked checkout integration with main/current distinction |
+| `WTP-AC-005` root/namespace | Design §9 | P4-P6 | precedence/root matrix/legacy-negative/namespace-symlink tests |
+| `WTP-AC-006` bootstrap matrix | Design §11 | P3, P4, P7 | six-state matrix, partial exit 1, retained artifacts |
+| `WTP-AC-007` Git partial artifacts | Design §10.3, §14.5 | P4, P7 | fake branch/path/record/null combinations; no cleanup |
+| `WTP-AC-008` inventory coverage | Design §12.1-12.3 | P5 | full record-kind payload and blockers |
+| `WTP-AC-009` target resolution | Design §12.4 | P5 | selector priority, duplicate IDs, candidates, branch rejection |
+| `WTP-AC-010` remove namespace boundary | Design §13.1-13.2 | P6 | managed success; external/main/current/bare/stale/symlink reject |
+| `WTP-AC-011` force/locked | Design §13.2-13.3 | P6 | default refusal, single force success, locked no-call matrix |
+| `WTP-AC-012` refresh/cleanup | Design §13.1, §13.4-13.5 | P6 | race cases, Git-first, no-follow target-only, partial cleanup |
+| `WTP-AC-013` JSON/streams | Design §14-15 | P7 | schema/stream/usage-error contract suite |
+| `WTP-AC-014` human interface | Design §15 | P7 | default text, prefix/path, complete/partial streams and exits |
+| `WTP-AC-015` skill create | Design §16.3 | P8 | explicit/ambiguous/auto-id/partial/no-task cases |
+| `WTP-AC-016` skill remove | Design §16.4 | P8 | explicit target, show-before-remove, blockers, force intent |
+| `WTP-AC-017` wrapper | Design §16.2 | P8 | fake PATH argv/stdout/stderr/exit/missing-CLI tests |
+| `WTP-AC-018` package/platform | Design §17 | P9, P10 | build/install/macOS/Linux evidence |
+| `WTP-AC-019` prototype replacement | Design §18, §21 | P7, P9 | no `core.py`/stale README/legacy lookup/exit-0 tests |
+| `WTP-AC-020` scope integrity | Design §20 and invariants | all, P10 audit | no out-of-scope code and no SpecDock repository changes |
+
+## 18. Verification command set
+
+Implementation完了時のminimum command set:
 
 ```bash
-tmp_venv="$(mktemp -d)/venv"
-python3 -m venv "$tmp_venv"
-"$tmp_venv/bin/pip" install dist/worktree_provisioner-*.whl
-"$tmp_venv/bin/worktree-provisioner" --help
-```
-
-### 11.7 Stop conditions
-
-- `pyproject.toml` は MIT だが `LICENSE` がない。
-- README が create-only のまま。
-- docs が SpecDock Workbench を tool scope に含める。
-- docs が default remove behavior と実装で異なる。
-- installed wheel が source checkout / sibling path を必要とする。
-
-### 11.8 完了条件
-
-- WP-AC-014 / WP-AC-015 pass。
-- package artifact is standalone。
-- docs / help / tests agree。
-
-## 12. Step P9 — Differential parity and full verification
-
-### 12.1 目的
-
-copy correctness を source baseline と独立 test suite の双方で証明する。
-
-### 12.2 Parity fixture
-
-`tests/parity/test_spec_dock_baseline.py` は環境変数が与えられたときだけ走る。
-
-```text
-SPEC_DOCK_SOURCE
-SPEC_DOCK_EXPECTED_SHA
-```
-
-fixture は次を fail-fast する。
-
-- source path missing
-- Git repository でない
-- SHA mismatch
-- source CLI / runtime missing
-
-parity test は source repo 自体を target repo として使わず、両 CLI に同等の temp Git repo fixture を与える。
-
-### 12.3 Comparison strategy
-
-#### Create
-
-比較:
-
-- selected id
-- path layout
-- branch
-- Git worktree record
-- bootstrap state
-- partial artifact state
-
-normalize:
-
-- command prefix
-- env name
-- JSON availability
-
-#### List / show
-
-比較:
-
-- path / branch / head
-- main / current / path_exists / record_exists
-- managed availability / reason
-- stable ids / candidate resolution
-- blockers
-
-normalize:
-
-- `origin=spec_dock_managed` -> `managed_namespace`
-- additive detached / bare / locked fields
-- envelope
-
-#### Remove
-
-strict parity cases:
-
-- main/current/bare/stale/protected blocker
-- external eligible
-- branch retained
-- Git failure -> no cleanup
-- cleanup failure partial result
-
-force delta comparison:
-
-- SpecDock default remove
-- destination `remove --force`
-
-standalone safety case:
-
-- destination default dirty remove refusal
-
-### 12.4 Commands
-
-```bash
-cd /Volumes/990p2t/workspace/tools/worktree-provisioner
-
-SPEC_DOCK_SOURCE="$tmp_source" \
-SPEC_DOCK_EXPECTED_SHA=ff09fd05d9862c399d4e22e760170dcb8c46ec6a \
-uv run pytest -m parity -q
-
-uv run pytest -m 'not parity' -q
+uv sync --all-groups
 uv run ruff format --check .
 uv run ruff check .
 uv run mypy src tests
+uv run pytest -q
 uv build
 git diff --check
 ```
 
-### 12.5 Source non-mutation verification
-
-P0 before-state と比較する。
+Scope checks:
 
 ```bash
-git -C /Volumes/990p2t/workspace/tools/spec-dock rev-parse HEAD
-git -C /Volumes/990p2t/workspace/tools/spec-dock status --short --untracked-files=all
+! rg -n 'spec_dock_runtime' src/worktree_provisioner
+! rg -n 'SPEC_DOCK_WORKTREE_ROOT' src/worktree_provisioner
+! rg -n '/Volumes/990p2t/workspace/worktrees' src/worktree_provisioner
+! rg -n 'worktree (status|prune|repair)' src/worktree_provisioner
 ```
 
-pre-existing user changes がある場合、clean を要求するのではなく before / after equivalence を要求する。
-
-### 12.6 Dependency hygiene
-
-```bash
-if rg -n 'spec_dock_runtime' src tests; then
-  echo 'unexpected SpecDock runtime dependency' >&2
-  exit 1
-fi
-
-rg -n 'SPEC_DOCK_WORKTREE_ROOT' src tests docs README.md
-```
-
-second command の match は legacy compatibility module / tests / docs に限定されることを review する。
-
-### 12.7 Stop conditions
-
-- parity source SHA mismatch を skip 扱いにする。
-- unexplained parity mismatch を expected delta に追加する。
-- cleanup safety mismatch を text-only difference として扱う。
-- full test が real root env を継承する。
-- source before / after state が変わる。
-
-### 12.8 完了条件
-
-- WP-AC-013 / WP-AC-016 pass。
-- all non-parity tests pass without SpecDock checkout。
-- all documented intentional deltas are exact and approved。
-- wheel install smoke pass。
-
-## 13. Step P10 — Local delivery and handoff
-
-### 13.1 目的
-
-publication authority を越えず、Codex / user が independent verification と commit decision を行える状態を渡す。
-
-### 13.2 Handoff evidence
-
-- baseline SHA
-- decision ledger
-- test counts / commands / results
-- parity matrix
-- intentional delta list
-- build artifact names / hashes
-- destination `git status --short`
-- source before / after equality
-- known limitations
-
-### 13.3 Commit boundary
-
-この plan は commit を自動承認しない。user が local commit を明示した場合のみ、reviewed files を one initial commit または logically separated local commits にする。
-
-推奨 initial history:
-
-1. `chore: initialize worktree-provisioner package`
-2. `feat: extract worktree create and inventory contracts`
-3. `feat: add guarded worktree removal and JSON CLI`
-4. `test: add SpecDock parity and packaging verification`
-
-destination に既存 commit がない前提が実装開始時に崩れた場合、この commit plan を適用しない。
-
-### 13.4 Remote / publication
-
-次は separate explicit authorization が必要。
-
-- `git remote add`
-- push
-- GitHub repository creation
-- package index publication
-- release/tag
-
-### 13.5 Completion criteria
-
-- requirement / design / plan の completion criteria を満たす。
-- no unreviewed prototype production path。
-- no source mutation。
-- no external publication。
-
-## 14. Step P11 — Later SpecDock migration, separate task
-
-### 14.1 Entry conditions
-
-- standalone tool の approved version が存在する。
-- install / invocation path が運用で利用可能。
-- JSON consumer migration が確認済み。
-- `SPEC_DOCK_WORKTREE_ROOT` compatibility policy が決定済み。
-
-### 14.2 Ordered migration
-
-1. SpecDock current consumers / docs / agent instructions を inventory する。
-2. `application/workbench.py` dependency decision を行う。
-3. Workbench を残す場合、read-only inventory / resolver を neutral internal module へ分離する。
-4. SpecDock worktree CLI を deprecated とするか、direct removal するか決める。
-5. optional shim を採用する場合、external binary availability / version mismatch / exit propagation を設計する。
-6. parser / registry / commands / use case wiring を remove する。
-7. worktree-only contracts / ports / adapters / renderers を remaining consumer から切り離す。
-8. provider assets と dogfooding mirror の双方を source-of-truth process に従って更新する。
-9. SpecDock tests / docs を更新する。
-10. separate PR / review / release を行う。
-
-### 14.3 Workbench coupling gate
-
-current `application/workbench.py` は次に直接依存する。
-
-- `WorktreeListRequest`
-- `application.worktree.worktree_list`
-- `application.worktree_target.resolve_worktree_target`
-- `WorktreeRecordView`
-
-この dependency が残る限り、worktree-related code 全削除はできない。tool delivery を待たせる理由にはしないが、later removal task の mandatory gate とする。
-
-### 14.4 Migration stop conditions
-
-- standalone tool release 前に SpecDock capability を削除する。
-- Workbench dependency を見落として import error を作る。
-- historical Epic docs を current command reference と同一扱いで書き換える。
-- provider asset だけ、または dogfooding mirror だけを更新する。
-- existing worktrees / branches を migration side effect で移動・削除する。
-
-### 14.5 Completion criteria
-
-- SpecDock no longer owns create/list/show/remove runtime capability。
-- retained Workbench has independent read-only inventory boundary, or Workbench itself is separately removed。
-- user / agent docs point to standalone CLI。
-- no existing worktree migration required。
-
-## 15. File ownership matrix
-
-| path | primary owner step | allowed later writers | notes |
-| --- | --- | --- | --- |
-| `pyproject.toml` | P1 foundation | P8 packaging | tool config only |
-| `LICENSE` | P1 foundation | none without policy review | original notice retained |
-| `src/worktree_provisioner/__init__.py` | P1 | P8 version | no broad exports |
-| `src/worktree_provisioner/__main__.py` | P1 | P7 CLI | thin `main()` call |
-| `application/contracts.py` | P3 contracts | P4-P6 via contracts owner review | stable JSON-facing types |
-| `application/ports.py` | P3 contracts | P4-P6 via contracts owner review | slim protocols only |
-| `application/worktree.py` | P4 create | P5 inventory -> P6 remove sequential handoff | no parallel edits |
-| `application/worktree_target.py` | P5 inventory | P6 remove bug fix only | pure resolver |
-| `infra/environment.py` | P3 environment | P4 root bug fix | no policy |
-| `infra/git_cli.py` | P3 git-adapter | P6 remove flag review | worktree subset only |
-| `infra/make_cli.py` | P3 bootstrap-adapter | P4 bootstrap bug fix | no CLI policy |
-| `infra/fs_cli.py` | P3 filesystem-adapter | P6 cleanup bug fix | no Workbench code |
-| `presentation/cli_text.py` | P7 CLI | P8 docs consistency fix | schema builder |
-| `cli.py` | P7 CLI | P8 packaging/help | no generic framework |
-| `tests/contract/test_create.py` | P4 | P9 parity hardening | source scenario mapping |
-| `tests/contract/test_inventory.py` | P5 | P9 | source scenario mapping |
-| `tests/contract/test_target.py` | P5 | P9 | resolver semantics |
-| `tests/contract/test_remove.py` | P6 | P9 | destructive safety |
-| `tests/contract/test_json_schema.py` | P7 | P9 | schema lock |
-| `tests/integration/*` | P7 | P9 | subprocess CLI |
-| `tests/parity/*` | P9 | none without baseline update | pinned source SHA |
-| `README.md` | P8 | P10 handoff corrections | family contract |
-| `docs/compatibility.md` | P8 | P9 parity evidence | migration map |
-| `docs/safety.md` | P8 | P9 safety evidence | security boundary |
-
-## 16. Quality gates
-
-### G0 — Authority gate
-
-- source SHA exact
-- `AGENTS.md` considered
-- destination actual inventory complete
-
-### G1 — Contract gate
-
-- requirements mapped to tests
-- security decisions recorded
-- no production copy before failing tests exist
-
-### G2 — Adapter gate
-
-- parser / Git / make / filesystem unit tests pass
-- no SpecDock import
-
-### G3 — Create gate
-
-- naming / root / linked normalization / bootstrap / partial failure pass
-
-### G4 — Inventory gate
-
-- classification / stable id / target resolution pass
-
-### G5 — Remove safety gate
-
-- hard blockers / refresh / Git-first / target-only cleanup pass
-- force policy approved
-
-### G6 — Interface gate
-
-- all CLI / JSON schema tests pass
-- expected JSON output is clean
-
-### G7 — Distribution gate
-
-- lint / format / type / full tests / build / wheel install pass
-- license / docs present
-
-### G8 — Parity gate
-
-- pinned source differential tests pass
-- only approved intentional deltas remain
-
-### G9 — Handoff gate
-
-- source unchanged
-- destination evidence complete
-- no unauthorized remote / publication
-
-## 17. Traceability table
-
-| requirement | design decisions / sections | implementation steps | proving tests / gates |
-| --- | --- | --- | --- |
-| `WP-RQ-001` product identity | DD-002, §3, §4 | P1, P8 | installed package test, G7 |
-| `WP-RQ-002` family CLI | DD-001, §5 | P7 | CLI help / usage, G6 |
-| `WP-RQ-003` repo validation | §4.5, §5.2 | P3, P4, P7 | repo outside / detached / subdir tests, G2/G3 |
-| `WP-RQ-004` root precedence | §4.3, §5.3 | P4 | exact env matrix, G3 |
-| `WP-RQ-005` root validation | §6, INV-003 | P4 | WP-AC-004 matrix, G3 |
-| `WP-RQ-006` layout / normalization | §6.1, INV-001/002 | P4 | linked normalization, central root tests, G3 |
-| `WP-RQ-007` naming | §6.2 | P4 | auto/label/ref tests, G3 |
-| `WP-RQ-008` collision | §6.3, INV-004 | P4 | dir/branch/record/Git retry tests, G3 |
-| `WP-RQ-009` partial artifacts | §11, INV-004 | P4 | fake partial artifact matrix, G3 |
-| `WP-RQ-010` bootstrap | §7, INV-005 | P3/P4 | make matrix / cwd, G2/G3 |
-| `WP-RQ-011` inventory | §8.1/8.2 | P5 | classification / record attribute tests, G4 |
-| `WP-RQ-012` target resolution | §8.3/8.4 | P5 | id/path/basename/ambiguity tests, G4 |
-| `WP-RQ-013` remove eligibility | §9.1/9.3, INV-007/008/009 | P6 | hard blocker × force matrix, G5 |
-| `WP-RQ-014` remove execution | §9.2/9.4, INV-010/011/012 | P6 | Git-first / cleanup / partial remove, G5 |
-| `WP-RQ-015` text / exit | §5.4 | P7 | subprocess stream/exit tests, G6 |
-| `WP-RQ-016` JSON | §10 | P7 | schema success/error tests, G6 |
-| `WP-RQ-017` errors | §11.1 | P4-P7 | one test per code, G3-G6 |
-| `WP-RQ-018` compatibility | DD-005, §10.8, §12 | P2/P9 | differential parity, G8 |
-| `WP-RQ-019` license | §12 mapping | P1/P8 | package/license inspection, G7 |
-| `WP-RQ-020` independence | DD-002, ALT-002 | P1/P8/P9/P10 | no-import grep, wheel smoke, source non-mutation, G7-G9 |
-| `WP-NFR-001` safety | §13 invariants | P3-P7 | destructive / injection / symlink tests, G2-G6 |
-| `WP-NFR-002` observability | §10/11 | P4/P6/P7 | artifact state / partial remove / JSON tests |
-| `WP-NFR-003` maintainability | §3/4 | P1/P3/P8 | Ruff/Mypy/Pytest/build |
-| `WP-NFR-004` performance | §6/8/9 | P4-P6 | gateway call count assertions |
-| `WP-NFR-005` platform | unresolved table | P8/P9 | macOS/Linux CI; Windows not claimed |
-| `WP-AC-001` basic create | §6/7 | P4/P7 | `test_create_auto_id_and_branch` |
-| `WP-AC-002` collisions | §6.3 | P4 | collision matrix |
-| `WP-AC-003` linked normalization | §6.1 | P4 | linked checkout integration |
-| `WP-AC-004` root matrix | §5.3/6 | P4 | root validation parametrized tests |
-| `WP-AC-005` invalid context | §4.5 | P3/P4 | repo/detached tests |
-| `WP-AC-006` make matrix | §7 | P3/P4 | bootstrap parametrized tests |
-| `WP-AC-007` partial failure | §11.1 | P4 | fake adapter partial-state tests |
-| `WP-AC-008` inventory | §8 | P5 | managed/external/stale/flags tests |
-| `WP-AC-009` target | §8.4 | P5 | target resolver tests |
-| `WP-AC-010` blockers | §9.1/9.3 | P6 | hard blocker matrix |
-| `WP-AC-011` remove cleanup | §9.2 | P6 | Git-first / target-only / branch retention |
-| `WP-AC-012` JSON | §10 | P7 | JSON schema suite |
-| `WP-AC-013` parity | §12 mapping | P9 | parity marker suite, G8 |
-| `WP-AC-014` package | §3/4 | P8/P9 | wheel install smoke, G7 |
-| `WP-AC-015` prototype replacement | DD-004, §12.3 | P7/P8 | no `core.py`, full suite |
-| `WP-AC-016` source non-mutation | §16 | P0/P9/P10 | before/after Git evidence, G9 |
-
-## 18. Final completion criteria
-
-worktree-provisioner delivery は次のすべてを満たしたとき complete とする。
-
-1. `create` / `list` / `show` / `remove` が standalone CLI として存在する。
-2. source baseline behavior が approved intentional delta を除いて parity test で確認される。
-3. linked normalization、collision、detached HEAD、root validation、make init、partial artifacts、non-retryable Git failure が dedicated tests で pass する。
-4. remove hard blockers、final refresh、Git-first、target-only cleanup、branch retention が pass する。
-5. JSON schema version `1` の success / error が全 command で pass する。
-6. prototype create-only monolith / README が残らない。
-7. `spec_dock_runtime` runtime dependency がない。
-8. Ruff / format / Mypy / full Pytest / build / wheel install smoke が pass する。
-9. source SpecDock repository が tool task により変更されていない。
-10. remote / publication は行われていない、または別の明示 authorization / evidence がある。
-11. later SpecDock removal が別 migration task として記録され、Workbench coupling が blocker として明示されている。
+Installed wheel smokeとskill wrapper fake-PATH testを追加する。
+
+## 19. Global stop conditions
+
+次のいずれかが発生したら実装を止め、silent workaroundを行わない。
+
+- owner decisionと異なるCLI/exit/safety behaviorが必要になった。
+- exact repository ancestryを確認できない。
+- external worktreeをremoveする設計になった。
+- locked worktreeをforce/unlockする設計になった。
+- bootstrap partialをcomplete successにする設計になった。
+- legacy env compatibilityが再導入された。
+- skillにbusiness logicが複製された。
+- SpecDock repositoryへの変更が必要になった。
+- out-of-scope commandまたはremote lifecycleが混入した。
+- unexpected Git failureを安全に分類できず、retryを広げようとしている。
+- path containment/raceによりmanaged boundaryを証明できない。
+
+## 20. Final completion criteria
+
+次の全てを満たすこと。
+
+1. 4 commandsがstandalone installed CLIとして動く。
+2. default textとexplicit schema v1 JSONが一致した状態を表す。
+3. rootは`--root`/new envのみで、legacy envを受理しない。
+4. create naming/collision/linked normalizationがpassする。
+5. bootstrap failureはretained + partial + exit1 + no rollbackである。
+6. list/showはexternalを観測できる。
+7. removeはmanaged namespace内だけである。
+8. default non-force、single explicit force、locked不可である。
+9. final refresh、Git-first、target-only no-follow cleanupがpassする。
+10. all error/partial contractsがversioned JSON testsで固定される。
+11. skill/wrapperのexplicit intent・force authorization・thinnessがpassする。
+12. create後にCodex task lifecycleを変更しない。
+13. prototype create-only/legacy behaviorがproduction pathに残らない。
+14. macOS/Linux evidence、lint、type、tests、build、install smokeがpassする。
+15. SpecDock repositoryを変更していない。
+16. status/prune/repair/branch deletion/remote/GitHub/Workbenchを追加していない。
+17. handoff evidenceが揃い、未確認事項が実装詳細として明記される。
