@@ -351,6 +351,25 @@ def test_real_make_parse_like_rule_error_is_not_static_absence(tmp_path: Path) -
     assert result.exit_code != 0
 
 
+@pytest.mark.parametrize(
+    "makefile",
+    [
+        "all:\nVAR=1\n\t@echo hi\n",
+        "all:\nVAR=1: all\n\t@echo hi\n",
+        "all: VAR=1\n",
+    ],
+)
+def test_real_make_recipe_context_assignment_is_not_static_absence(tmp_path: Path, makefile: str) -> None:
+    if shutil.which("make") is None:
+        pytest.skip("make is unavailable")
+    (tmp_path / "Makefile").write_text(makefile, encoding="utf-8")
+
+    result = MakeCliGateway().run_make_init_if_available(tmp_path)
+
+    assert result.status == "detection_failed"
+    assert result.exit_code != 0
+
+
 def test_real_make_orphan_recipe_is_not_static_absence(tmp_path: Path) -> None:
     if shutil.which("make") is None:
         pytest.skip("make is unavailable")

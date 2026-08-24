@@ -50,7 +50,11 @@ def error_document(error: ExpectedError) -> dict[str, object]:
         operation=error.operation,
         result=result,
         error=error,
-        warnings=_warnings_for_result(result),
+        # A terminal error may not have a partial result (for example, a
+        # later candidate failure after one or more collision retries).  Keep
+        # the accumulated typed warnings at the envelope boundary in that
+        # case; a partial result remains the fallback for older callers.
+        warnings=error.warnings or _warnings_for_result(result),
     )
 
 
@@ -93,7 +97,10 @@ def envelope(
     warning_payloads: list[dict[str, object]] = []
     for warning in warnings:
         if isinstance(warning, ResultWarning):
-            warning_payloads.append({"code": warning.code, "message": warning.message})
+            payload: dict[str, object] = {"code": warning.code, "message": warning.message}
+            if warning.facts:
+                payload["facts"] = json_value(warning.facts)
+            warning_payloads.append(payload)
         else:
             warning_payloads.append(
                 {
@@ -121,12 +128,11 @@ def _warnings_for_result(result: object | None) -> tuple[ResultWarning, ...]:
 def dumps(document: Mapping[str, object]) -> str:
     """Serialize exactly one v1 document without a trailing human message."""
 
-    # Keep human-readable UTF-8 for ordinary paths.  ``os.fsdecode`` uses
-    # surrogateescape for undecodable Unix pathname bytes; those surrogates
-    # cannot be written to a UTF-8 text stream with ``ensure_ascii=False``.
-    # Escaping only such documents keeps the representation valid UTF-8 and
-    # reversible while preserving the existing non-ASCII path contract.
-    return json.dumps(document, ensure_ascii=_contains_surrogate(document))
+    # JSON is written through the process stdout text stream.  ASCII-only
+    # serialization keeps the wire contract independent of that stream's
+    # ambient locale/encoding while remaining reversible for every Unicode
+    # path and diagnostic.
+    return json.dumps(document, ensure_ascii=True)
 
 
 def operation_for_result(result: object) -> str:
@@ -264,16 +270,6 @@ def remove_payload(result: RemoveResult) -> dict[str, object]:
 def _absolute_path(path: Path) -> str:
     candidate = path.expanduser()
     return str(candidate if candidate.is_absolute() else candidate.absolute())
-
-
-def _contains_surrogate(value: object) -> bool:
-    if isinstance(value, str):
-        return any(0xD800 <= ord(character) <= 0xDFFF for character in value)
-    if isinstance(value, Mapping):
-        return any(_contains_surrogate(key) or _contains_surrogate(item) for key, item in value.items())
-    if isinstance(value, (tuple, list, set)):
-        return any(_contains_surrogate(item) for item in value)
-    return False
 
 
 def _bounded(value: str, limit: int = 4096) -> str:

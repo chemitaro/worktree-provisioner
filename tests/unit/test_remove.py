@@ -16,7 +16,7 @@ from worktree_provisioner.application.contracts import (
 from worktree_provisioner.application.ports import ApplicationPorts
 from worktree_provisioner.application.worktree_service import WorktreeService
 from worktree_provisioner.infra.environment import EnvironmentAdapter
-from worktree_provisioner.infra.filesystem import FilesystemCliGateway
+from worktree_provisioner.infra.filesystem import DirectoryHandle, FilesystemCliGateway
 
 
 def _service(git: FakeGitGateway, filesystem: FilesystemCliGateway | None = None) -> WorktreeService:
@@ -415,11 +415,50 @@ def test_post_git_lstat_race_is_reported_as_cleanup_partial(tmp_path: Path) -> N
     assert result.removed_directory is False
 
 
+def test_cleanup_namespace_swap_to_external_symlink_never_removes_outside(
+    tmp_path: Path,
+) -> None:
+    repo, root, target, git = _fixture(tmp_path)
+    namespace = root / repo.name
+    moved_namespace = root / f"{repo.name}-renamed"
+    external = tmp_path / "external-cleanup"
+    external.mkdir()
+    state = {"git_removed": False, "swapped": False}
+
+    class SwapAfterTargetCheckFilesystem(FilesystemCliGateway):
+        def path_exists_no_follow(self, path: Path) -> bool:
+            exists = FilesystemCliGateway.path_exists_no_follow(self, path)
+            if path == target and exists and state["git_removed"] and not state["swapped"]:
+                state["swapped"] = True
+                namespace.rename(moved_namespace)
+                namespace.symlink_to(external, target_is_directory=True)
+            return exists
+
+    class RemovingGit(FakeGitGateway):
+        def remove_worktree(self, repo_root: Path, *, path: Path, force: bool) -> None:
+            state["git_removed"] = True
+            FakeGitGateway.remove_worktree(self, repo_root, path=path, force=force)
+
+    git = RemovingGit(
+        checkout_root=git.checkout_root,
+        records=git.records,
+        branches=git.branches,
+    )
+    with pytest.raises(ExpectedError) as caught:
+        _service(git, SwapAfterTargetCheckFilesystem()).remove(_request(repo, root, target, force=True))
+
+    assert caught.value.code == "post_remove_cleanup_failed"
+    assert caught.value.status == "partial"
+    assert state["swapped"]
+    assert (moved_namespace / target.name).is_dir()
+    assert not (external / target.name).exists()
+
+
 def test_post_git_cleanup_failure_is_partial_and_branch_is_retained(tmp_path: Path) -> None:
     repo, root, target, git = _fixture(tmp_path)
 
     class FailingCleanupFilesystem(FilesystemCliGateway):
-        def remove_target_no_follow(self, path: Path) -> None:
+        def remove_target_no_follow_bound(self, directory: DirectoryHandle, path: Path) -> None:
             raise PermissionError("cleanup denied")
 
     with pytest.raises(ExpectedError) as caught:

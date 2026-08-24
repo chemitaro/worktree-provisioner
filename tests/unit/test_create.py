@@ -24,6 +24,8 @@ from worktree_provisioner.application.worktree_service import WorktreeService
 from worktree_provisioner.infra.environment import EnvironmentAdapter
 from worktree_provisioner.infra.filesystem import FilesystemCliGateway
 from worktree_provisioner.infra.git_cli import GitAdapterError
+from worktree_provisioner.presentation.json_v1 import error_document
+from worktree_provisioner.presentation.text import render_error
 
 
 def _ports(git, bootstrap, filesystem) -> ApplicationPorts:
@@ -212,6 +214,58 @@ def test_known_git_collision_retries_next_candidate(tmp_path: Path) -> None:
     assert result.id == "wt2"
     assert result.branch == "main-wt2"
     assert git.attempts == 2
+
+
+@dataclass
+class CollisionThenTerminalErrorGit(FakeGitGateway):
+    attempts: int = 0
+
+    def add_worktree(self, repo_root: Path, *, path: Path, branch: str) -> None:
+        self._record("add_worktree", repo_root, path=path, branch=branch)
+        self.attempts += 1
+        if self.attempts == 1:
+            self.branches.add(branch)
+            raise GitAdapterError(
+                operation="add_worktree",
+                argv=("git", "worktree", "add"),
+                message="known branch collision",
+                collision_kind="branch",
+            )
+        raise GitAdapterError(
+            operation="add_worktree",
+            argv=("git", "worktree", "add"),
+            message="later ref-lock failure",
+            diagnostic="fatal: ref lock already exists",
+        )
+
+
+def test_retry_warning_facts_reach_later_terminal_error_json_and_text(tmp_path: Path) -> None:
+    repo = tmp_path / "checkout"
+    repo.mkdir()
+    git = CollisionThenTerminalErrorGit(checkout_root=repo, records=[FakeGitRecord(path=repo)], branches={"main"})
+    filesystem = FakeFilesystemGateway()
+
+    with pytest.raises(ExpectedError) as caught:
+        WorktreeService(_ports(git, FakeBootstrapGateway(), filesystem)).create(_request(repo, tmp_path / "root"))
+
+    error = caught.value
+    assert error.code == "git_worktree_add_failed"
+    assert len(error.warnings) == 1
+    warning = error.warnings[0]
+    assert warning.code == "collision_partial_artifact"
+    assert warning.facts == {
+        "candidate_id": "wt1",
+        "branch": "main-wt1",
+        "path": str(tmp_path / "root" / "checkout" / "checkout-wt1"),
+        "path_exists": False,
+        "branch_exists": True,
+        "worktree_record_exists": False,
+    }
+    document = error_document(error)
+    assert document["warnings"] == [{"code": warning.code, "message": warning.message, "facts": dict(warning.facts)}]
+    _stdout, stderr = render_error(error)
+    assert "code=collision_partial_artifact" in stderr
+    assert "facts=branch=main-wt1" in stderr
 
 
 class BranchColliderRaceGit(FakeGitGateway):

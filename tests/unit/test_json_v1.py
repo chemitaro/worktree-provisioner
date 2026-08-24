@@ -158,6 +158,7 @@ def test_dumps_escapes_surrogateescape_paths_as_reversible_utf8() -> None:
 
     assert serialized.encode("utf-8")
     assert r"\udcff" in serialized
+    assert all(ord(character) < 128 for character in serialized)
     assert json.loads(serialized)["path"] == surrogate_path
     assert json.loads(serialized)["label"] == "日本語"
 

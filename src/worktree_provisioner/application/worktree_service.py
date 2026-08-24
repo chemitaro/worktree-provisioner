@@ -119,11 +119,7 @@ class WorktreeService:
 
         warnings: list[ResultWarning] = []
         try:
-            self.ports.git.add_worktree(
-                request.repo_root,
-                path=candidate.path,
-                branch=candidate.branch,
-            )
+            self._add_worktree(request.repo_root, namespace=namespace, candidate=candidate)
         except Exception as exc:
             # Inspect the failed candidate before deciding whether to retry.
             # The artifact named by a typed collision is the expected race
@@ -541,7 +537,7 @@ class WorktreeService:
         if not exists:
             return None
         try:
-            self.ports.filesystem.remove_target_no_follow(target.path)
+            self._remove_target(namespace, target.path)
         except Exception as exc:
             # A target that disappeared between the existence check and the
             # cleanup adapter is already clean.  Other races and permissions
@@ -555,6 +551,17 @@ class WorktreeService:
                 "kind": getattr(exc, "kind", None),
             }
         return None
+
+    def _remove_target(self, namespace: Path, target: Path) -> None:
+        """Remove a leftover target through a namespace-bound capability."""
+
+        open_directory = getattr(self.ports.filesystem, "open_directory", None)
+        remove_bound = getattr(self.ports.filesystem, "remove_target_no_follow_bound", None)
+        if callable(open_directory) and callable(remove_bound):
+            with open_directory(namespace) as directory:
+                remove_bound(directory, target)
+            return
+        self.ports.filesystem.remove_target_no_follow(target)
 
     def _inventory_views(
         self,
@@ -892,6 +899,30 @@ class WorktreeService:
                 },
             ) from exc
 
+    def _add_worktree(
+        self,
+        repo_root: Path,
+        *,
+        namespace: Path,
+        candidate: WorktreeCandidate,
+    ) -> None:
+        """Use the descriptor-bound adapter path when available."""
+
+        open_directory = getattr(self.ports.filesystem, "open_directory", None)
+        add_worktree_bound = getattr(self.ports.git, "add_worktree_bound", None)
+        if callable(open_directory) and callable(add_worktree_bound):
+            with open_directory(namespace) as directory:
+                add_worktree_bound(
+                    repo_root,
+                    directory=directory,
+                    name=candidate.path.name,
+                    branch=candidate.branch,
+                )
+            return
+        # Test doubles and third-party ports that implement the original
+        # narrow protocol keep the existing fixed Git operation semantics.
+        self.ports.git.add_worktree(repo_root, path=candidate.path, branch=candidate.branch)
+
     def _result_after_add(
         self,
         request: CreateRequest,
@@ -994,20 +1025,27 @@ class WorktreeService:
             # refresh exposed its record; explicitly skip it once.
             if candidate.id == failed_candidate.id:
                 continue
-            collision = self._preflight_collision(request.repo_root, candidate, known_paths)
+            try:
+                collision = self._preflight_collision(request.repo_root, candidate, known_paths)
+            except ExpectedError as exc:
+                raise self._with_warnings(exc, warnings) from exc
             if collision is not None:
                 continue
-            self._ensure_create_directories(root, namespace, request.repo_root, candidate)
+            try:
+                self._ensure_create_directories(root, namespace, request.repo_root, candidate)
+            except ExpectedError as exc:
+                raise self._with_warnings(exc, warnings) from exc
             try:
                 validate_namespace(root, repo_basename, self.ports.filesystem)
             except RootResolutionError as exc:
-                raise self._error(code=exc.code, message=str(exc), details=exc.details) from exc
+                raise self._error(
+                    code=exc.code,
+                    message=str(exc),
+                    details=exc.details,
+                    warnings=warnings,
+                ) from exc
             try:
-                self.ports.git.add_worktree(
-                    request.repo_root,
-                    path=candidate.path,
-                    branch=candidate.branch,
-                )
+                self._add_worktree(request.repo_root, namespace=namespace, candidate=candidate)
             except Exception as exc:
                 artifacts = self._observe_artifacts(request.repo_root, candidate, namespace)
                 if is_retryable_git_collision(exc):
@@ -1016,6 +1054,9 @@ class WorktreeService:
                         _append_collision_warning(warnings, candidate, artifacts)
                         known_paths = {_record_canonical_path(record) for record in refreshed}
                         continue
+                # A non-retryable terminal failure must still expose every
+                # partial artifact retained by an earlier collision attempt.
+                _append_collision_warning(warnings, candidate, artifacts)
                 raise self._error(
                     code="git_worktree_add_failed",
                     message=f"git worktree add failed for {candidate.id}",
@@ -1026,6 +1067,7 @@ class WorktreeService:
                         "artifacts": _artifact_dict(artifacts),
                         "diagnostic": _bounded(str(exc)),
                     },
+                    warnings=warnings,
                 ) from exc
             result = self._result_after_add(
                 request,
@@ -1056,6 +1098,7 @@ class WorktreeService:
                     details={"bootstrap": _bootstrap_dict(bootstrap)},
                     result=result,
                     status="partial",
+                    warnings=warnings,
                 )
             if bootstrap.status == "failed":
                 raise self._error(
@@ -1064,6 +1107,7 @@ class WorktreeService:
                     details={"bootstrap": _bootstrap_dict(bootstrap)},
                     result=result,
                     status="partial",
+                    warnings=warnings,
                 )
             return result
 
@@ -1071,6 +1115,26 @@ class WorktreeService:
             code="candidate_exhausted",
             message="worktree create exhausted candidate attempts",
             details={"attempts": MAX_CANDIDATE_ATTEMPTS},
+            warnings=warnings,
+        )
+
+    def _with_warnings(
+        self,
+        error: ExpectedError,
+        warnings: Sequence[ResultWarning],
+    ) -> ExpectedError:
+        """Carry retry history through an unrelated terminal application error."""
+
+        if not warnings:
+            return error
+        return ExpectedError(
+            code=error.code,
+            operation=error.operation,
+            message=error.message,
+            details=error.details,
+            result=error.result,
+            status=error.status,
+            warnings=tuple(warnings) + error.warnings,
         )
 
     def _error(
@@ -1082,6 +1146,7 @@ class WorktreeService:
         result: object | None = None,
         status: str = "error",
         operation: Operation = "create",
+        warnings: Sequence[ResultWarning] = (),
     ) -> ExpectedError:
         # The typed Literal contract is intentionally enforced at the shared
         # boundary; local adapter diagnostics cannot invent a public status.
@@ -1093,6 +1158,7 @@ class WorktreeService:
             details=details,
             result=result,
             status=response_status,  # type: ignore[arg-type]
+            warnings=tuple(warnings),
         )
 
 
@@ -1265,7 +1331,20 @@ def _append_collision_warning(
         f"branch_exists={artifacts.branch_exists} "
         f"worktree_record_exists={artifacts.worktree_record_exists}"
     )
-    warnings.append(ResultWarning(code=_COLLISION_WARNING_CODE, message=_bounded(message)))
+    warnings.append(
+        ResultWarning(
+            code=_COLLISION_WARNING_CODE,
+            message=_bounded(message),
+            facts={
+                "candidate_id": _bounded(candidate.id, limit=128),
+                "branch": _bounded(candidate.branch, limit=256),
+                "path": _bounded(str(candidate.path), limit=1024),
+                "path_exists": artifacts.worktree_path_exists,
+                "branch_exists": artifacts.branch_exists,
+                "worktree_record_exists": artifacts.worktree_record_exists,
+            },
+        )
+    )
 
 
 def _collision_retry_is_safe(

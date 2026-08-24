@@ -41,7 +41,11 @@ Git linked worktree を管理するための model-invoked skill です。実際
    ./scripts/worktree-provisioner create [label] --repo <repo> --root <root> [--no-bootstrap] --json
    ```
 
-3. `status` を解釈し、成功なら `result.id`、`result.branch`、`result.worktree_path` の絶対パス、`result.bootstrap.status` を報告する。partial なら同じ成果物に加えて retained worktree/branch と bootstrap failure の詳細を明示し、完了扱いにしない。
+3. `status` を解釈し、成功なら `result.id`、`result.branch`、`result.worktree_path` の絶対パス、`result.bootstrap.status` を報告する。
+   成功・partial・error のいずれでも envelope の `warnings` を必ず確認する。`collision_partial_artifact` があれば warning の
+   `message` は解析せず、`facts.candidate_id`、`facts.branch`、`facts.path`、各 `*_exists` を機械的に報告する。partial なら
+   同じ成果物に加えて retained worktree/branch と bootstrap failure の詳細を明示し、完了扱いにしない。retry 後の後続 error でも
+   warnings を確認し、保持された候補を隠さない。
 
 完了条件: fact gate 成功後の create は1回だけで、報告に id、branch、absolute path、bootstrap state が含まれ、Codex task lifecycle は変更していない。
 
@@ -49,6 +53,7 @@ Git linked worktree を管理するための model-invoked skill です。実際
 
 - 利用者が要求した read-only operation を wrapper 経由で JSON で一度実行する。
 - `schema_version=1` と `status` を確認し、`status=ok` なら `result` を報告する。`error.code` と exit code がある場合はそのまま原因を報告する。
+  `warnings` は常に確認し、`collision_partial_artifact` の stable code と typed `facts` を報告する。warning message の文言には依存しない。
 - JSON envelope を人間向け text と混ぜず、CLI の schema や target resolution を skill 側で再実装しない。
 
 完了条件: requested operation の JSON envelope を根拠に結果または修正可能な error を報告し、書き込み操作を追加していない。
@@ -70,7 +75,7 @@ Git linked worktree を管理するための model-invoked skill です。実際
    ./scripts/worktree-provisioner remove <target> --repo <repo> --root <root> [--force] --json
    ```
 
-4. `status=ok`、`partial`、`error` を区別して報告する。locked target は手動で `git worktree unlock` が必要だと報告するだけにし、skill 自身は unlock や再試行を実行しない。
+4. `status=ok`、`partial`、`error` を区別して報告する。`warnings` があれば stable code と typed facts を確認・報告する。locked target は手動で `git worktree unlock` が必要だと報告するだけにし、skill 自身は unlock や再試行を実行しない。
 
 完了条件: show の確認後に条件を満たす remove が最大1回だけ実行され、force intent が明示されていない呼び出しに `--force` がなく、task lifecycle や unlock を実行していない。
 

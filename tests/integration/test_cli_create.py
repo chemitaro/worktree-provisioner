@@ -5,11 +5,11 @@ from pathlib import Path
 
 from conftest import TempGitRepository  # type: ignore[import-not-found]
 
-from worktree_provisioner.application.contracts import CreateRequest
+from worktree_provisioner.application.contracts import CreateRequest, ExpectedError
 from worktree_provisioner.application.ports import ApplicationPorts
 from worktree_provisioner.application.worktree_service import WorktreeService
 from worktree_provisioner.infra.environment import EnvironmentAdapter
-from worktree_provisioner.infra.filesystem import FilesystemCliGateway
+from worktree_provisioner.infra.filesystem import DirectoryHandle, FilesystemCliGateway
 from worktree_provisioner.infra.git_cli import GitCliGateway
 from worktree_provisioner.infra.make_cli import MakeCliGateway
 from worktree_provisioner.presentation import json_v1, text
@@ -43,18 +43,26 @@ def test_create_json_contract_has_absolute_facts(
 def test_create_retries_real_git_path_race_and_retains_partial_branch(
     temp_git_repo: TempGitRepository, central_root: Path, monkeypatch
 ) -> None:
-    original_add = GitCliGateway.add_worktree
+    original_add = GitCliGateway.add_worktree_bound
     attempts = 0
 
-    def race_once(gateway: GitCliGateway, repo_root: Path, *, path: Path, branch: str) -> None:
+    def race_once(
+        gateway: GitCliGateway,
+        repo_root: Path,
+        *,
+        directory: DirectoryHandle,
+        name: str,
+        branch: str,
+    ) -> None:
         nonlocal attempts
         attempts += 1
+        path = directory.path / name
         if attempts == 1:
             path.mkdir(parents=True)
             (path / "concurrent-file").write_text("race\n", encoding="utf-8")
-        original_add(gateway, repo_root, path=path, branch=branch)
+        original_add(gateway, repo_root, directory=directory, name=name, branch=branch)
 
-    monkeypatch.setattr(GitCliGateway, "add_worktree", race_once)
+    monkeypatch.setattr(GitCliGateway, "add_worktree_bound", race_once)
     git = GitCliGateway()
     result = WorktreeService(
         ApplicationPorts(
@@ -88,11 +96,64 @@ def test_create_retries_real_git_path_race_and_retains_partial_branch(
     assert "branch_exists=True" in warning.message
 
     document = json_v1.success_document(result)
-    assert document["warnings"] == [{"code": warning.code, "message": warning.message}]
+    assert document["warnings"] == [{"code": warning.code, "message": warning.message, "facts": dict(warning.facts)}]
     text_warnings = text.render_warnings(result)
     assert len(text_warnings) == 1
     assert "worktree-provisioner: warning: code=collision_partial_artifact" in text_warnings[0]
     assert "branch=main-wt1" in text_warnings[0]
+
+
+def test_create_namespace_swap_to_external_symlink_never_creates_outside(
+    temp_git_repo: TempGitRepository, central_root: Path, monkeypatch
+) -> None:
+    original_add = GitCliGateway.add_worktree_bound
+    namespace = central_root / temp_git_repo.path.name
+    moved_namespace = central_root / f"{temp_git_repo.path.name}-renamed"
+    external = central_root.parent / "external-create-target"
+    external.mkdir()
+    swapped = False
+
+    def swap_before_git(
+        gateway: GitCliGateway,
+        repo_root: Path,
+        *,
+        directory: DirectoryHandle,
+        name: str,
+        branch: str,
+    ) -> None:
+        nonlocal swapped
+        swapped = True
+        namespace.rename(moved_namespace)
+        namespace.symlink_to(external, target_is_directory=True)
+        original_add(gateway, repo_root, directory=directory, name=name, branch=branch)
+
+    monkeypatch.setattr(GitCliGateway, "add_worktree_bound", swap_before_git)
+    service = WorktreeService(
+        ApplicationPorts(
+            git=GitCliGateway(),
+            bootstrap=MakeCliGateway(),
+            filesystem=FilesystemCliGateway(),
+            environment=EnvironmentAdapter(),
+        )
+    )
+
+    try:
+        result = service.create(
+            CreateRequest(
+                repo_root=temp_git_repo.path,
+                root=central_root,
+                label="race",
+                bootstrap_enabled=False,
+            )
+        )
+    except ExpectedError:
+        result = None
+
+    assert swapped
+    assert not (external / f"{temp_git_repo.path.name}-race").exists()
+    assert not (external / f"{temp_git_repo.path.name}-wt1").exists()
+    assert result is None
+    assert (moved_namespace / f"{temp_git_repo.path.name}-race").is_dir()
 
 
 def test_create_without_label_text_contract_uses_wt1_and_absolute_path(

@@ -76,6 +76,46 @@ def test_non_utf8_linked_worktree_path_is_valid_json_and_removable(
     assert not invalid_path.exists()
 
 
+def test_json_wire_is_ascii_safe_under_c_locale_for_unicode_paths(
+    git_repo_factory, tmp_path: Path, cli_runner, json_loads
+) -> None:
+    repo = git_repo_factory(name="repo-日本語")
+    root = tmp_path / "managed-日本語"
+    environment = {
+        "LC_ALL": "C",
+        "LANG": "C",
+        "PYTHONCOERCECLOCALE": "0",
+        "PYTHONUTF8": "0",
+        "PYTHONIOENCODING": "ascii",
+    }
+
+    created = cli_runner(
+        "create", "unicode", "--no-bootstrap", "--json", repo=repo.path, root=root, environment=environment
+    )
+    created_payload = _payload(created, json_loads)
+    assert created.returncode == 0, created.stderr
+    assert all(ord(character) < 128 for character in created.stdout)
+    target = Path(created_payload["result"]["worktree_path"])
+    assert "日本語" in str(target)
+
+    listed = cli_runner("list", "--json", repo=repo.path, root=root, environment=environment)
+    listed_payload = _payload(listed, json_loads)
+    assert listed.returncode == 0, listed.stderr
+    assert all(ord(character) < 128 for character in listed.stdout)
+    assert any(record["path"] == str(target) for record in listed_payload["result"]["worktrees"])
+
+    shown = cli_runner("show", "unicode", "--json", repo=repo.path, root=root, environment=environment)
+    shown_payload = _payload(shown, json_loads)
+    assert shown.returncode == 0, shown.stderr
+    assert all(ord(character) < 128 for character in shown.stdout)
+    assert shown_payload["result"]["worktree"]["path"] == str(target)
+
+    removed = cli_runner("remove", "unicode", "--json", repo=repo.path, root=root, environment=environment)
+    assert removed.returncode == 0, removed.stderr
+    assert all(ord(character) < 128 for character in removed.stdout)
+    assert not target.exists()
+
+
 def test_show_supports_id_and_absolute_path_selectors(
     temp_git_repo: TempGitRepository, central_root: Path, cli_runner, json_loads
 ) -> None:

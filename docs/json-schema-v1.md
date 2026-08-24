@@ -22,14 +22,33 @@
 | `operation` | `create` / `list` / `show` / `remove` / `null` | 実行した command。parse 前の usage error は `null` の場合がある |
 | `result` | object / `null` | 成功または partial の operation payload |
 | `error` | object / `null` | `code`、`message`、`details`。成功時は `null` |
-| `warnings` | array | `{code, message}` の warning。通常は空配列。retryで保持されたGit artifactは `collision_partial_artifact` として通知する |
+| `warnings` | array | `{code, message, facts?}` の warning。通常は空配列。retryで保持されたGit artifactは `collision_partial_artifact` として通知する |
 
 expected JSON error は `status=error` または `status=partial` であり、`error.code` を機械判定に使用します。message wording は
 stable contract ではありません。usage error の終了コードは `2`、operational error と partial は `1` です。
 
 `collision_partial_artifact` warningは、typed Git collisionのretry後もfailed candidateのbranch/pathまたはworktree recordが
-観測された場合に出力されます。`message`にはcandidateの`id`、branch、absolute path、各artifactの観測状態をboundedに含みます。
+観測された場合に出力されます。`facts`には `candidate_id`、`branch`、`path`、`path_exists`、`branch_exists`、
+`worktree_record_exists` を typed に含みます。機械 consumer は message を解析せず、これらの facts と stable code を使って
+保持された成果物を報告してください。retry後に別の候補で停止した場合も warnings は terminal error envelope へ伝播します。
 Gitのrollbackやbranch削除は行われません。
+
+warning の形は次のとおりです。
+
+```json
+{
+  "code": "collision_partial_artifact",
+  "message": "bounded human diagnostic",
+  "facts": {
+    "candidate_id": "wt1",
+    "branch": "main-wt1",
+    "path": "/worktrees/repo/repo-wt1",
+    "path_exists": true,
+    "branch_exists": true,
+    "worktree_record_exists": false
+  }
+}
+```
 
 ## Operation payloads
 

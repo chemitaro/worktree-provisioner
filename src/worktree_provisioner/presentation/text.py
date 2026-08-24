@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 
 from worktree_provisioner.application.contracts import (
@@ -68,21 +69,35 @@ def render_error(error: ExpectedError) -> tuple[str, str]:
             f"removed_record={remove_result.removed_record} removed_directory={remove_result.removed_directory}"
         )
     stderr_lines = [f"worktree-provisioner: error: {error.message}"]
-    stderr_lines.extend(render_warnings(error.result))
+    stderr_lines.extend(render_warnings(error.result, warnings=error.warnings))
     stderr = "\n".join(stderr_lines)
     return stdout, stderr
 
 
-def render_warnings(result: object) -> tuple[str, ...]:
-    if not isinstance(result, CreateResult):
-        return ()
-    return tuple(_warning_line(warning) for warning in result.warnings)
+def render_warnings(
+    result: object | None = None,
+    *,
+    warnings: Sequence[ResultWarning] = (),
+) -> tuple[str, ...]:
+    selected = tuple(warnings)
+    if not selected and isinstance(result, CreateResult):
+        selected = result.warnings
+    return tuple(_warning_line(warning) for warning in selected)
 
 
 def _warning_line(warning: ResultWarning) -> str:
     message = warning.message.replace("\r", "\\r").replace("\n", "\\n")
     safe_message = message.encode("utf-8", errors="backslashreplace").decode("utf-8")
-    return f"worktree-provisioner: warning: code={warning.code} message={safe_message}"
+    line = f"worktree-provisioner: warning: code={warning.code} message={safe_message}"
+    if warning.facts:
+        facts = " ".join(f"{key}={_safe_fact(value)}" for key, value in sorted(warning.facts.items()))
+        line += f" facts={facts}"
+    return line
+
+
+def _safe_fact(value: object) -> str:
+    rendered = str(value).replace("\r", "\\r").replace("\n", "\\n")
+    return rendered.encode("utf-8", errors="backslashreplace").decode("utf-8")
 
 
 def _absolute_path(path: Path) -> str:

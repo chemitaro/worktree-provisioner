@@ -8,7 +8,7 @@ instances here; presentation/JSON conversion belongs to a later layer.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, TypeAlias
 
@@ -132,6 +132,10 @@ class ResultWarning:
 
     code: str
     message: str
+    # Stable facts are separate from the human diagnostic.  Machine consumers
+    # must be able to report retained collision artifacts without parsing the
+    # bounded message string.
+    facts: Mapping[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -224,7 +228,7 @@ class RemoveResult:
 class ExpectedError(RuntimeError):
     """Structured operational error expected by the CLI boundary."""
 
-    __slots__ = ("code", "details", "message", "operation", "result", "status")
+    __slots__ = ("code", "details", "message", "operation", "result", "status", "warnings")
 
     code: ErrorCode
     operation: Operation | None
@@ -232,6 +236,7 @@ class ExpectedError(RuntimeError):
     details: Mapping[str, object]
     result: object | None
     status: Literal["partial", "error"]
+    warnings: tuple[ResultWarning, ...]
 
     def __init__(
         self,
@@ -242,6 +247,7 @@ class ExpectedError(RuntimeError):
         details: Mapping[str, object],
         result: object | None,
         status: Literal["partial", "error"],
+        warnings: tuple[ResultWarning, ...] = (),
     ) -> None:
         super().__init__(message)
         self.code = code
@@ -250,6 +256,7 @@ class ExpectedError(RuntimeError):
         self.details = details
         self.result = result
         self.status = status
+        self.warnings = tuple(warnings)
 
 
 # The design document uses this longer name in its error-boundary example.

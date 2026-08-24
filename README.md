@@ -147,6 +147,9 @@ expected error は stdout にJSONを1文書だけ出し、stderr は空です。
 
 field、型、nullability、各 command の result payload は [JSON schema v1 reference](docs/json-schema-v1.md) を正本とします。
 agent は human text を解析せず、`status` と `error.code`、result 内の absolute path と artifact state を利用してください。
+`warnings` は成功・partial・terminal error のすべてで必ず確認し、`collision_partial_artifact` があれば message を解析せず
+`facts` の candidate、branch、path、各 existence state をそのまま報告してください。retry 後の後続エラーでも、保持された
+partial artifact を success response から隠しません。
 
 ## Skill safety boundary
 

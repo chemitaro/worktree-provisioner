@@ -239,6 +239,87 @@ class GitCliGateway:
             collision_kind=_classify_add_collision(diagnostic, branch=branch_name, path=target),
         )
 
+    def add_worktree_bound(self, repo_root: Path, *, directory: object, name: str, branch: str) -> None:
+        """Add a worktree relative to an already-open namespace directory.
+
+        ``directory`` is the descriptor capability supplied by the no-follow
+        filesystem adapter.  Git is explicitly pointed at the repository;
+        the child process is then moved to the open directory descriptor
+        before Git resolves the relative target.  This keeps a namespace
+        rename/symlink replacement from redirecting the mutation.
+        """
+
+        repo = _validated_path(repo_root, name="repository root")
+        fd = getattr(directory, "fd", None)
+        directory_path = getattr(directory, "path", None)
+        if not isinstance(fd, int) or fd < 0 or not isinstance(directory_path, Path):
+            raise GitAdapterError(
+                operation="add_worktree_bound",
+                argv=(),
+                message="worktree namespace capability is invalid",
+            )
+        target_name = _validated_relative_name(name)
+        branch_name = _validated_branch(branch)
+        common_git_dir = self._common_git_dir(repo)
+        args = (
+            "--git-dir",
+            str(common_git_dir),
+            "worktree",
+            "add",
+            "-b",
+            branch_name,
+            target_name,
+        )
+        completed = self._run(
+            repo,
+            args,
+            operation="add_worktree_bound",
+            check=False,
+            cwd_fd=fd,
+        )
+        if completed.returncode == 0:
+            identity_matches = getattr(directory, "path_identity_matches", None)
+            if callable(identity_matches) and not identity_matches():
+                raise GitAdapterError(
+                    operation="add_worktree_bound",
+                    argv=self._argv(args),
+                    message="managed namespace changed during Git worktree add",
+                    returncode=completed.returncode,
+                )
+            return
+        diagnostic = _diagnostic(completed.stdout, completed.stderr)
+        # Git reports the relative operand used by this fd-bound command,
+        # rather than the descriptor's lexical path.
+        target = Path(target_name)
+        raise GitAdapterError(
+            operation="add_worktree_bound",
+            argv=self._argv(args),
+            message=f"git command failed with exit code {completed.returncode}",
+            returncode=completed.returncode,
+            diagnostic=diagnostic,
+            collision_kind=_classify_add_collision(diagnostic, branch=branch_name, path=target),
+        )
+
+    def _common_git_dir(self, repo_root: Path) -> Path:
+        """Resolve Git's shared administrative directory before fd binding."""
+
+        completed = self._run(
+            repo_root,
+            ("rev-parse", "--git-common-dir"),
+            operation="resolve_git_common_dir",
+            text=False,
+        )
+        raw = _remove_stdout_delimiter(completed.stdout)
+        if not raw:
+            raise GitAdapterError(
+                operation="resolve_git_common_dir",
+                argv=self._argv(("rev-parse", "--git-common-dir")),
+                message="git returned an empty common directory",
+                returncode=completed.returncode,
+            )
+        common = Path(os.fsdecode(raw))
+        return common if common.is_absolute() else (repo_root / common).absolute()
+
     def remove_worktree(self, repo_root: Path, *, path: Path, force: bool) -> None:
         """Remove one worktree, adding exactly one ``--force`` when requested."""
 
@@ -259,6 +340,7 @@ class GitCliGateway:
         operation: str,
         check: bool = True,
         text: Literal[True] = True,
+        cwd_fd: int | None = None,
     ) -> subprocess.CompletedProcess[str]: ...
 
     @overload
@@ -270,6 +352,7 @@ class GitCliGateway:
         operation: str,
         check: bool = True,
         text: Literal[False],
+        cwd_fd: int | None = None,
     ) -> subprocess.CompletedProcess[bytes]: ...
 
     def _run(
@@ -280,6 +363,7 @@ class GitCliGateway:
         operation: str,
         check: bool = True,
         text: bool = True,
+        cwd_fd: int | None = None,
     ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
         argv = self._argv(args)
         if shutil.which(self.git_executable) is None:
@@ -290,15 +374,28 @@ class GitCliGateway:
             )
 
         try:
-            completed = subprocess.run(
-                list(argv),
-                cwd=repo_root,
-                capture_output=True,
-                text=text,
-                check=False,
-                shell=False,
-                env=_git_environment(),
-            )
+            if cwd_fd is None:
+                completed = subprocess.run(
+                    list(argv),
+                    cwd=repo_root,
+                    capture_output=True,
+                    text=text,
+                    check=False,
+                    shell=False,
+                    env=_git_environment(),
+                )
+            else:
+                completed = subprocess.run(
+                    list(argv),
+                    cwd=repo_root,
+                    capture_output=True,
+                    text=text,
+                    check=False,
+                    shell=False,
+                    env=_git_environment(),
+                    pass_fds=(cwd_fd,),
+                    preexec_fn=lambda: os.fchdir(cwd_fd),
+                )
         except OSError as exc:
             raise GitAdapterError(
                 operation=operation,
@@ -473,6 +570,22 @@ def _validated_branch(branch: str) -> str:
             message="branch must be a non-empty string without NUL bytes",
         )
     return branch
+
+
+def _validated_relative_name(name: str) -> str:
+    if not isinstance(name, str) or not name or "\x00" in name:
+        raise GitAdapterError(
+            operation="validate_path",
+            argv=(),
+            message="worktree name must be a non-empty string without NUL bytes",
+        )
+    if name in {".", ".."} or "/" in name or "\\" in name:
+        raise GitAdapterError(
+            operation="validate_path",
+            argv=(),
+            message="bound worktree name must be one path component",
+        )
+    return name
 
 
 def _diagnostic_text(value: str | bytes | None) -> str | None:

@@ -393,6 +393,14 @@ def _static_proves_init_absent(makefile: Path) -> bool:
         if assignment is not None:
             if assignment.group("name") in _MAKE_AUTHORITY_VARIABLES:
                 return False
+            # An assignment after a rule header can make a following tabbed
+            # recipe cease to belong to that rule (GNU Make reports
+            # ``commands commence before first target``).  Target-specific
+            # assignments also contain a second colon and require Make's
+            # own graph semantics.  Neither form is safe for this source-only
+            # absence proof.
+            if saw_rule or ":" in semantic[assignment.end() :]:
+                return False
             continue
         colon = semantic.find(":")
         if colon < 1:
@@ -408,6 +416,11 @@ def _static_proves_init_absent(makefile: Path) -> bool:
         if left.startswith("."):
             return False
         if "init" in left.split():
+            return False
+        # ``target: VAR=value`` is a target-specific assignment, not a plain
+        # prerequisite list.  Its meaning depends on Make's rule context and
+        # must not be accepted by this intentionally tiny absence proof.
+        if "=" in semantic[colon + 1 :]:
             return False
         # A rule that can remake the selected makefile means the direct
         # failure may depend on a generated/reloaded source.  It is not safe
