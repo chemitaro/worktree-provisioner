@@ -402,13 +402,14 @@ def _run_database_probe(make_executable: str, cwd: Path) -> subprocess.Completed
     """Print Make's parsed database while preserving the direct goal context.
 
     The probe keeps ``init`` as its goal so Makefile conditionals observe the
-    same ``MAKECMDGOALS`` and variable origins as direct detection.  ``-r`` /
-    ``-R`` only remove built-in rules and variables, allowing user-defined
-    fallback rules to be distinguished from the default Make database.
+    same ``MAKECMDGOALS`` and variable origins as direct detection.  Built-in
+    rules remain enabled so ``MAKEFLAGS`` and rule selection have the same
+    meaning as the direct probe; the database parser ignores built-in recipes
+    when deciding whether the repository declares an ``init`` target.
     """
 
     return _run_bounded_process(
-        (make_executable, "-n", "-p", "-r", "-R", "init"),
+        (make_executable, "-n", "-p", "init"),
         cwd,
         retain_limit=_DATABASE_OUTPUT_LIMIT,
     )
@@ -421,7 +422,9 @@ def _database_facts(output: str, target: str) -> tuple[bool, bool] | None:
     rule headers in that section avoids treating ``$(info init:)`` or a
     diagnostic as a target.  ``None`` means the output was truncated or was
     not a database, which is a detection failure rather than an absence proof.
-    The fallback fact covers pattern/default rules whose failure can otherwise
+    Built-in implicit rules are deliberately ignored: they are Make's
+    fallback machinery, not repository bootstrap authority.  The fallback
+    fact covers repository pattern/default rules whose failure can otherwise
     be mistaken for an absent ``init`` target.
     """
 
@@ -442,26 +445,52 @@ def _database_facts(output: str, target: str) -> tuple[bool, bool] | None:
             None,
         )
         if implicit_start is not None:
+            implicit_matches_target = False
+            implicit_is_builtin = False
             for line in lines[implicit_start + 1 : start]:
-                if line and not line.startswith("#") and not line.startswith("\t") and ":" in line:
-                    header, _, _ = line.partition(":")
-                    if any(_pattern_matches_target(pattern, target) for pattern in header.split()):
-                        has_fallback_rule = True
+                if line.startswith("#") or line.startswith("\t") or not line:
+                    if _is_builtin_recipe_marker(line):
+                        implicit_is_builtin = True
+                    continue
+                header, separator, _ = line.partition(":")
+                if not separator:
+                    continue
+                if implicit_matches_target and not implicit_is_builtin:
+                    has_fallback_rule = True
+                implicit_matches_target = any(
+                    _pattern_matches_target(pattern, target) for pattern in header.split()
+                )
+                implicit_is_builtin = False
+            if implicit_matches_target and not implicit_is_builtin:
+                has_fallback_rule = True
 
         current_header: str | None = None
         current_has_commands = False
+        current_target_matches = False
+        current_is_builtin = False
         not_a_target = False
+
         for line in lines[start + 1 : end]:
             if line == "# Not a target:":
-                if current_header == ".DEFAULT" and current_has_commands:
-                    has_fallback_rule = True
-                not_a_target = True
+                finalized_fallback, finalized_target = _finalize_database_target(
+                    current_header,
+                    current_has_commands,
+                    current_target_matches,
+                    current_is_builtin,
+                )
+                has_fallback_rule = has_fallback_rule or finalized_fallback
+                has_target = has_target or finalized_target
                 current_header = None
                 current_has_commands = False
+                current_target_matches = False
+                current_is_builtin = False
+                not_a_target = True
                 continue
             if not line or line.startswith("#") or line.startswith("\t"):
                 if line.startswith(("#  commands to execute", "#  recipe to execute")) and current_header == ".DEFAULT":
                     current_has_commands = True
+                if _is_builtin_recipe_marker(line) and current_target_matches:
+                    current_is_builtin = True
                 continue
             header, separator, _ = line.partition(":")
             if not separator:
@@ -469,18 +498,41 @@ def _database_facts(output: str, target: str) -> tuple[bool, bool] | None:
             if not_a_target:
                 not_a_target = False
                 continue
-            if current_header == ".DEFAULT" and current_has_commands:
-                has_fallback_rule = True
+            finalized_fallback, finalized_target = _finalize_database_target(
+                current_header,
+                current_has_commands,
+                current_target_matches,
+                current_is_builtin,
+            )
+            has_fallback_rule = has_fallback_rule or finalized_fallback
+            has_target = has_target or finalized_target
             current_header = header
             current_has_commands = False
-            if header.startswith("."):
-                continue
-            if target in header.split():
-                has_target = True
-        if current_header == ".DEFAULT" and current_has_commands:
-            has_fallback_rule = True
+            current_target_matches = not header.startswith(".") and target in header.split()
+            current_is_builtin = False
+        finalized_fallback, finalized_target = _finalize_database_target(
+            current_header,
+            current_has_commands,
+            current_target_matches,
+            current_is_builtin,
+        )
+        has_fallback_rule = has_fallback_rule or finalized_fallback
+        has_target = has_target or finalized_target
         return has_target, has_fallback_rule
     return None
+
+
+def _finalize_database_target(
+    header: str | None,
+    has_commands: bool,
+    target_matches: bool,
+    is_builtin: bool,
+) -> tuple[bool, bool]:
+    if header == ".DEFAULT" and has_commands:
+        return True, False
+    if target_matches and not is_builtin:
+        return False, True
+    return False, False
 
 
 def _pattern_matches_target(pattern: str, target: str) -> bool:
@@ -497,6 +549,10 @@ def _pattern_matches_target(pattern: str, target: str) -> bool:
     if not target.startswith(prefix):
         return False
     return target[len(prefix) :].endswith(suffix)
+
+
+def _is_builtin_recipe_marker(line: str) -> bool:
+    return line.startswith(("#  commands to execute (built-in):", "#  recipe to execute (built-in):"))
 
 
 def _is_plain_missing_target_failure(stderr: str) -> bool:
