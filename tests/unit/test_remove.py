@@ -102,6 +102,37 @@ def test_external_target_is_blocked_before_git_even_with_force(tmp_path: Path, f
     assert target.is_dir()
 
 
+@pytest.mark.parametrize("force", [False, True])
+def test_nested_managed_target_is_blocked_before_git_even_with_force(tmp_path: Path, force: bool) -> None:
+    repo, root, target, git = _fixture(tmp_path)
+    nested = root / repo.name / "nested" / target.name
+    nested.parent.mkdir()
+    target.rename(nested)
+    git.records[1] = FakeGitRecord(path=nested, branch="feature")
+
+    class TrackingFilesystem(FilesystemCliGateway):
+        cleanup_calls = 0
+
+        def remove_target_no_follow(self, path: Path) -> None:
+            self.cleanup_calls += 1
+            super().remove_target_no_follow(path)
+
+        def remove_target_no_follow_bound(self, directory: DirectoryHandle, path: Path) -> None:
+            self.cleanup_calls += 1
+            super().remove_target_no_follow_bound(directory, path)
+
+    filesystem = TrackingFilesystem()
+
+    with pytest.raises(ExpectedError) as caught:
+        _service(git, filesystem).remove(_request(repo, root, nested, force=force))
+
+    assert caught.value.code == "remove_blocked"
+    assert "nested_target_unsupported" in _blockers(caught.value)
+    assert not [call for call in git.calls if call[0] == "remove_worktree"]
+    assert filesystem.cleanup_calls == 0
+    assert nested.is_dir()
+
+
 @pytest.mark.parametrize(
     ("case", "force"),
     [

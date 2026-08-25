@@ -115,6 +115,10 @@ worktree-provisioner show <id-or-absolute-path-or-basename> \
 stable id が優先され、basename が複数候補に一致する場合は候補を含むエラーになります。branch 名を selector として使う
 機能はありません。
 
+managed namespace の nested descendant も `list` / `show` では managed record として表示されますが、初期版の remove
+対象は namespace 直下の single path component に限られます。nested record は `removable=false`、
+`remove_blockers=["nested_target_unsupported"]` となり、`--force` を指定しても削除されません。
+
 ### Remove
 
 ```bash
@@ -122,8 +126,9 @@ worktree-provisioner remove <id-or-absolute-path-or-basename> \
   --repo /path/to/repository --root /path/to/worktrees
 ```
 
-`remove` は `WTP-THREAT-001` の脅威モデル内で configured managed namespace 内の worktree だけを対象にします。main、現在使用中、bare、stale、external、
-locked、unsafe namespace の record は削除できません。locked worktree は `--force` でも unlock しません。先に利用者が
+`remove` は `WTP-THREAT-001` の脅威モデル内で configured managed namespace 直下の single path component worktree
+だけを対象にします。main、現在使用中、bare、stale、external、nested、locked、unsafe namespace の record は削除できません。
+locked worktree は `--force` でも unlock しません。先に利用者が
 `git worktree unlock` を実行し、保護が解除されたことを確認してください。
 
 既定の削除は non-force です。dirty または untracked の変更を Git が拒否した場合、filesystem cleanup は行いません。明示的な

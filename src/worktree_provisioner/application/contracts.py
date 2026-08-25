@@ -65,6 +65,7 @@ BlockerCode: TypeAlias = Literal[
     "target_changed_after_refresh",
     "outside_managed_namespace",
     "classification_unavailable",
+    "nested_target_unsupported",
     "protected_cleanup_path",
     "unsafe_namespace",
 ]

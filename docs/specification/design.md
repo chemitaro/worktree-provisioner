@@ -50,6 +50,7 @@ language: ja
 - default non-force / explicit single force
 - locked worktree は force でも不可
 - external inventory observable / external remove forbidden
+- remove eligibility is limited to a single path component directly under the configured managed namespace; nested descendants remain observable and managed-classified but are blocked with `nested_target_unsupported`
 - namespace symlink は create/remove forbidden
 - macOS/Linux only
 - skill authorization rules、thin wrapper、no task lifecycle mutation
@@ -641,6 +642,7 @@ record view の blockers:
 - missing path -> `path_missing`
 - managed false + classification available -> `outside_managed_namespace`
 - classification unavailable -> `classification_unavailable`
+- managed path with more than one lexical component below namespace -> `nested_target_unsupported`
 
 `removable = blockers is empty`。
 
@@ -670,12 +672,13 @@ exact id は basename ambiguity より優先する。ambiguous candidatesは ful
 9. verify canonical path identity unchanged
 10. recalculate blockers; any blocker => stop
 11. recheck protected paths / containment
-12. git worktree remove [--force] <path>
-13. on Git failure: no filesystem cleanup; best-effort read-only inventory refresh and target `lstat` observation may classify partial state
-14. recheck containment
-15. if target remains: target-only no-follow cleanup
-16. cleanup success: ok
-17. cleanup failure: partial, removed_record=true, removed_directory=false
+12. verify target is a single path component directly below namespace; nested descendant blocker => stop
+13. git worktree remove [--force] <path>
+14. on Git failure: no filesystem cleanup; best-effort read-only inventory refresh and target `lstat` observation may classify partial state
+15. recheck containment
+16. if target remains: target-only no-follow cleanup
+17. cleanup success: ok
+18. cleanup failure: partial, removed_record=true, removed_directory=false
 ```
 
 final refresh / bound check は mutation 前の race reduction である。Git remove 後の namespace / target recheck が
@@ -696,6 +699,7 @@ final refresh / bound check は mutation 前の race reduction である。Git r
 - `target_changed_after_refresh`
 - `outside_managed_namespace`
 - `classification_unavailable`
+- `nested_target_unsupported`
 - `protected_cleanup_path`
 - `unsafe_namespace`
 
@@ -710,6 +714,7 @@ cmd.append(str(path))
 
 - default dirty/untracked behavior は Git に委ねる。
 - locked record は adapter 前に拒否する。
+- nested descendant は adapter 前に拒否し、`--force` でも解除しない。
 - force intent は request booleanに明示する。
 - skill は userの別途明示なしに booleanをtrueにしない。
 

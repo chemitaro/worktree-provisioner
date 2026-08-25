@@ -100,6 +100,7 @@ def test_literal_contracts_expose_stable_values() -> None:
         "internal_error",
     }
     assert "outside_managed_namespace" in get_args(BlockerCode)
+    assert "nested_target_unsupported" in get_args(BlockerCode)
     assert "classification_unavailable" in get_args(WorktreeOrigin)
 
 

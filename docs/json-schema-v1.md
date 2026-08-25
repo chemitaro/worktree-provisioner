@@ -65,7 +65,8 @@ warning の形は次のとおりです。
 `worktree` は `id`、`path`、`basename`、`branch`、`head`、`detached`、`bare`、`locked`、`lock_reason`、`main`、
 `current`、`path_exists`、`record_exists`、`managed`、`classification_available`、`classification_reason`、`origin`、
 `removable`、`remove_blockers` を持ちます。path は常に absolute string、unknown な nullable value は `null`、boolean は
-boolean、blocker の一覧は配列です。
+boolean、blocker の一覧は配列です。managed namespace の直下以外の nested descendant は `managed=true` を維持しつつ
+`removable=false`、`remove_blockers=["nested_target_unsupported"]` となります。これは `--force` でも解除されません。
 
 ## Example: bootstrap partial
 

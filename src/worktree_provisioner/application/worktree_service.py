@@ -503,8 +503,11 @@ class WorktreeService:
         # Inventory classification is intentionally repeated at the remove
         # boundary; a malformed view must fail closed rather than rely on a
         # presentation-layer ``managed`` flag.
-        if not self._is_managed_path(record.path, namespace) and "outside_managed_namespace" not in blockers:
+        managed = self._is_managed_path(record.path, namespace)
+        if not managed and "outside_managed_namespace" not in blockers:
             blockers.append("outside_managed_namespace")
+        elif managed and _is_nested_descendant(record.path, namespace):
+            blockers.append("nested_target_unsupported")
         return tuple(dict.fromkeys(blockers))
 
     def _is_protected_cleanup_path(
@@ -743,6 +746,7 @@ class WorktreeService:
                 path_exists=path_exists,
                 managed=managed,
                 classification_available=available,
+                nested_managed=managed and _is_nested_descendant(_record_path(record), namespace.namespace),
             )
             origin: WorktreeOrigin
             if not available:
@@ -1310,6 +1314,18 @@ def _is_strict_descendant(path: Path, parent: Path) -> bool:
     return path != parent and parent in path.parents
 
 
+def _is_nested_descendant(path: Path, namespace: Path) -> bool:
+    """Return whether a path is below the namespace by more than one component."""
+
+    lexical_path = _absolute_lexical_path(path)
+    lexical_namespace = _absolute_lexical_path(namespace)
+    try:
+        relative = lexical_path.relative_to(lexical_namespace)
+    except ValueError:
+        return False
+    return len(relative.parts) > 1
+
+
 def _disambiguate_ids(
     provisional: Sequence[tuple[GitWorktreeRecord, bool, bool, bool, str, str, bool, bool]],
 ) -> list[str]:
@@ -1349,6 +1365,7 @@ def _remove_blockers(
     path_exists: bool,
     managed: bool,
     classification_available: bool,
+    nested_managed: bool,
 ) -> tuple[BlockerCode, ...]:
     blockers: list[BlockerCode] = []
     if main:
@@ -1364,6 +1381,8 @@ def _remove_blockers(
     if classification_available:
         if not managed:
             blockers.append("outside_managed_namespace")
+        elif nested_managed:
+            blockers.append("nested_target_unsupported")
     else:
         blockers.append("classification_unavailable")
     return tuple(blockers)

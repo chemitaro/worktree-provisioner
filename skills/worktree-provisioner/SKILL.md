@@ -33,6 +33,8 @@ race に対する destructive scope の絶対保証を主張しません。skill
 1. 依頼が create/list/show/remove のどれかを分類する。
 2. create では create intent、対象 repository、managed root、実行による副作用が明確かを確認する。曖昧なら質問して停止し、wrapper を実行しない。label 省略だけは owner-approved auto-id のため質問しない。
 3. remove では削除対象が明示された単一 target かを確認する。曖昧な basename、外部 target、protected target は停止する。
+   managed namespace の nested descendant は list/show で観測できますが、`nested_target_unsupported` blocker のため
+   removable ではありません。`--force` でも解除しません。
 4. repository と root の事実は CLI の引数（`--repo`、`--root`）または合意済みの CLI default で明示する。wrapper に root を注入したり、CLI の root precedence を再実装したりしない。
 
 完了条件: intent、repository、root、対象、side effect のうち必要な事実が確定し、未確定ならコマンドを一度も実行していない。
@@ -81,7 +83,7 @@ race に対する destructive scope の絶対保証を主張しません。skill
    ./scripts/worktree-provisioner show <target> --repo <repo> --root <root> --json
    ```
 
-2. `status=ok` で、`result.worktree` が要求した target と完全一致し、`managed=true`、`removable=true`、`remove_blockers=[]` であることを確認する。いずれかが満たされなければ remove しない。external、ambiguous、protected、blocker 付きの target も停止する。
+2. `status=ok` で、`result.worktree` が要求した target と完全一致し、`managed=true`、`removable=true`、`remove_blockers=[]` であることを確認する。いずれかが満たされなければ remove しない。external、ambiguous、protected、nested、blocker 付きの target も停止する。
 3. force の利用者明示がない限り `--force` を付けず、次を一度だけ実行する。利用者が force を明示した場合だけ `--force` をちょうど一度付ける。
 
    ```text

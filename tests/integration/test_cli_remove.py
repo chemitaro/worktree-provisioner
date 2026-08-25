@@ -6,14 +6,6 @@ from typing import cast
 import pytest
 from conftest import CliResult, TempGitRepository  # type: ignore[import-not-found]
 
-from worktree_provisioner.application.contracts import ExpectedError, RemoveRequest
-from worktree_provisioner.application.ports import ApplicationPorts
-from worktree_provisioner.application.worktree_service import WorktreeService
-from worktree_provisioner.infra.environment import EnvironmentAdapter
-from worktree_provisioner.infra.filesystem import DirectoryHandle, FilesystemCliGateway
-from worktree_provisioner.infra.git_cli import GitCliGateway
-from worktree_provisioner.infra.make_cli import MakeCliGateway
-
 
 def _payload(result: CliResult, json_loads: object) -> dict[str, object]:
     assert callable(json_loads)
@@ -72,68 +64,58 @@ def test_remove_by_stable_id_is_supported(
     assert resolved_target["path"] == str(target)
 
 
-def test_remove_nested_managed_worktree_uses_relative_descendant_path(
-    temp_git_repo: TempGitRepository, central_root: Path, cli_runner, json_loads
+@pytest.mark.parametrize("force", [False, True])
+def test_nested_managed_worktree_is_observable_but_blocked_before_mutation(
+    temp_git_repo: TempGitRepository,
+    central_root: Path,
+    tmp_path: Path,
+    cli_runner,
+    json_loads,
+    force: bool,
 ) -> None:
     target = _add_worktree(
         temp_git_repo,
         central_root / temp_git_repo.path.name / "nested" / f"{temp_git_repo.path.name}-nested",
         "nested-target",
     )
-
-    result = cli_runner("remove", str(target), "--json", repo=temp_git_repo.path, root=central_root)
-    payload = _payload(result, json_loads)
-    result_payload = _mapping(payload["result"])
-
-    assert result.returncode == 0, result.stderr
-    assert payload["status"] == "ok"
-    assert result_payload["removed_record"] is True
-    assert result_payload["removed_directory"] is True
-    assert not target.exists()
-    assert "nested-target" in temp_git_repo.git("branch", "--list").stdout
-
-
-def test_remove_nested_parent_swap_after_bound_check_fails_closed(
-    temp_git_repo: TempGitRepository, central_root: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    target = _add_worktree(
-        temp_git_repo,
-        central_root / temp_git_repo.path.name / "nested" / f"{temp_git_repo.path.name}-nested-race",
-        "nested-race",
-    )
-    namespace = central_root / temp_git_repo.path.name
-    nested = namespace / "nested"
-    moved_nested = central_root.parent / f"{temp_git_repo.path.name}-nested-moved"
-    external = central_root.parent / "external-nested-target"
+    external = tmp_path / "external-nested-target"
     external.mkdir()
-    original_check = DirectoryHandle.is_within_bound_root
-    swapped = False
+    sentinel = external / "sentinel"
+    sentinel.write_text("must remain\n", encoding="utf-8")
 
-    def swap_after_parent_check(handle: DirectoryHandle) -> bool:
-        nonlocal swapped
-        result = original_check(handle)
-        if handle.path == nested and not swapped:
-            swapped = True
-            nested.rename(moved_nested)
-            nested.symlink_to(external, target_is_directory=True)
-        return result
+    listed = cli_runner("list", "--json", repo=temp_git_repo.path, root=central_root)
+    listed_payload = _payload(listed, json_loads)
+    listed_result = _mapping(listed_payload["result"])
+    listed_worktrees = cast(list[dict[str, object]], listed_result["worktrees"])
+    listed_record = next(record for record in listed_worktrees if record["path"] == str(target))
+    assert listed.returncode == 0, listed.stderr
+    assert listed_record["managed"] is True
+    assert listed_record["origin"] == "managed_namespace"
+    assert listed_record["removable"] is False
+    assert listed_record["remove_blockers"] == ["nested_target_unsupported"]
 
-    monkeypatch.setattr(DirectoryHandle, "is_within_bound_root", swap_after_parent_check)
-    service = WorktreeService(
-        ApplicationPorts(
-            git=GitCliGateway(),
-            bootstrap=MakeCliGateway(),
-            filesystem=FilesystemCliGateway(),
-            environment=EnvironmentAdapter(),
-        )
-    )
+    shown = cli_runner("show", "nested", "--json", repo=temp_git_repo.path, root=central_root)
+    shown_payload = _payload(shown, json_loads)
+    shown_record = _mapping(_mapping(shown_payload["result"])["worktree"])
+    assert shown.returncode == 0, shown.stderr
+    assert shown_record["path"] == str(target)
+    assert shown_record["managed"] is True
+    assert shown_record["removable"] is False
+    assert shown_record["remove_blockers"] == ["nested_target_unsupported"]
 
-    with pytest.raises(ExpectedError) as caught:
-        service.remove(RemoveRequest(repo_root=temp_git_repo.path, root=central_root, target=str(target), force=True))
+    remove_args = ["remove", str(target)]
+    if force:
+        remove_args.append("--force")
+    remove_args.extend(["--json"])
+    result = cli_runner(*remove_args, repo=temp_git_repo.path, root=central_root)
+    payload = _payload(result, json_loads)
+    error = _mapping(payload["error"])
+    error_details = _mapping(error["details"])
 
-    assert caught.value.code == "git_worktree_remove_failed"
-    assert swapped
-    assert (moved_nested / target.name).is_dir()
-    assert nested.is_symlink()
-    assert not (external / target.name).exists()
+    assert result.returncode == 1
+    assert payload["status"] == "error"
+    assert error["code"] == "remove_blocked"
+    assert error_details["remove_blockers"] == ["nested_target_unsupported"]
+    assert target.is_dir()
+    assert sentinel.read_text(encoding="utf-8") == "must remain\n"
     assert str(target) in temp_git_repo.git("worktree", "list", "--porcelain").stdout

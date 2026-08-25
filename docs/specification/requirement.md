@@ -302,8 +302,12 @@ preflight 後の `git worktree add` で発生した既知の path/branch/checked
 - final refresh 後も同じ canonical target record として解決できる。
 - namespace が symlink ではない。
 - target が root、namespace、main repo、またはそれらを包含する protected path ではない。
+- 初期版で remove できる managed target は、configured managed namespace の直下にある single path component の
+  worktree に限る。
 
 external worktree は `list` / `show` では可視だが、`outside_managed_namespace` blocker により `remove` を拒否する。`--force` はこの blocker を解除しない。
+namespace 直下以外の nested descendant は `list` / `show` で managed record として可視性・分類を維持するが、
+`nested_target_unsupported` blocker により `removable=false` とする。`--force` はこの blocker を解除しない。
 
 ### `WTP-RQ-013` Remove execution
 
@@ -311,6 +315,7 @@ external worktree は `list` / `show` では可視だが、`outside_managed_name
 - `--force` は `git worktree remove --force <path>` 相当の一段階だけとする。
 - double force、自動 unlock、`git worktree prune`、branch deletion を実行しない。
 - locked record は Git command を呼ぶ前に `locked_worktree` blocker で拒否する。
+- nested descendant は Git command および filesystem cleanup の前に `nested_target_unsupported` blocker で拒否する。
 - initial resolve 後、mutation 直前に Git records を再取得し、target と blockers を再評価する。
 - Git remove が失敗した場合は filesystem cleanup、rollback、retry を実行せず、read-only の Git inventory refresh と target `lstat`（no-follow）observation のみ best-effort で許可する。
 - Git remove 成功後に target path が残る場合だけ、containment を再検証して target-only cleanup を行う。
@@ -400,6 +405,7 @@ Remove blocker codes:
 - `target_changed_after_refresh`
 - `outside_managed_namespace`
 - `classification_unavailable`
+- `nested_target_unsupported`
 - `protected_cleanup_path`
 - `unsafe_namespace`
 
@@ -579,6 +585,8 @@ namespace の ancestor inode を rename / replace することを、現在の Gi
 ### `WTP-AC-010` Remove namespace boundary
 
 - clean managed target は削除できる。
+- managed namespace の nested descendant は list/show で observable な managed record として返し、
+  `removable=false`、`nested_target_unsupported` とする。default / `--force` の双方で Git remove 前に拒否する。
 - clean external target は default / `--force` の双方で Git remove 前に拒否する。
 - namespace symlink、main、current、bare、stale は default / `--force` の双方で拒否する。
 
@@ -592,6 +600,8 @@ namespace の ancestor inode を rename / replace することを、現在の Gi
 ### `WTP-AC-012` Remove refresh and cleanup
 
 - target disappearance、path change、new ambiguity、new blocker を final refresh で検出する。
+- nested descendant は final mutation に到達する前に `nested_target_unsupported` で拒否し、Git remove と filesystem
+  cleanup を呼ばない。
 - Git remove failure 後は filesystem cleanup を行わず、read-only の inventory refresh と target `lstat` observation のみ best-effort で許可する。
 - Git success 後の leftover directory / symlink / broken symlink / regular file を target-only で処理する。
 - parent/root/namespace/main repo sentinel は残る。

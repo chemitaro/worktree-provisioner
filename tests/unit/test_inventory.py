@@ -32,6 +32,8 @@ def test_inventory_preserves_flags_and_deterministic_blockers(tmp_path: Path) ->
     namespace.mkdir(parents=True)
     managed = namespace / "checkout-feature"
     managed.mkdir()
+    nested = namespace / "nested" / "checkout-nested"
+    nested.mkdir(parents=True)
     locked = namespace / "checkout-locked"
     locked.mkdir()
     external = tmp_path / "external"
@@ -40,6 +42,7 @@ def test_inventory_preserves_flags_and_deterministic_blockers(tmp_path: Path) ->
     records = [
         FakeGitRecord(path=repo, head="main-head", branch="main"),
         FakeGitRecord(path=managed, head="feature-head", branch="feature"),
+        FakeGitRecord(path=nested, head="nested-head", branch="nested"),
         FakeGitRecord(path=external, head="external-head", branch="external"),
         FakeGitRecord(
             path=locked,
@@ -76,6 +79,11 @@ def test_inventory_preserves_flags_and_deterministic_blockers(tmp_path: Path) ->
     assert by_branch["feature"].origin == "managed_namespace"
     assert by_branch["feature"].removable is True
     assert by_branch["feature"].remove_blockers == ()
+
+    assert by_branch["nested"].managed is True
+    assert by_branch["nested"].origin == "managed_namespace"
+    assert by_branch["nested"].removable is False
+    assert by_branch["nested"].remove_blockers == ("nested_target_unsupported",)
 
     assert by_branch["external"].origin == "external"
     assert by_branch["external"].managed is False

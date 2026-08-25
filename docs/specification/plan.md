@@ -37,6 +37,8 @@ language: ja
 - remove default non-force、`--force`はsingle force。
 - locked targetはforceでも拒否。
 - external targetは表示のみ、remove不可。
+- managed namespace 直下の single path component だけを remove 対象とし、nested descendant は managed として観測可能だが
+  `nested_target_unsupported` で default / `--force` とも mutation 前に拒否する。
 - namespace symlinkではcreate/remove不可。
 - skillはinstalled CLIのthin wrapperだけを使う。
 - force intentは別途明示が必要。
@@ -482,8 +484,11 @@ uv run pytest tests/unit/test_root_and_naming.py tests/unit/test_create.py \
 - main/current/bare/locked/path_missing
 - outside_managed_namespace
 - classification_unavailable
+- nested_target_unsupported
 
 external recordはlist/show successでobservable、`removable=false`。
+namespace 直下以外の managed descendant も list/show success で `managed=true` を維持するが、
+`removable=false`, `remove_blockers=["nested_target_unsupported"]` とする。
 
 ### 9.4 Target tests
 
@@ -527,10 +532,11 @@ uv run pytest tests/unit/test_inventory.py tests/unit/test_target_resolver.py \
 6. canonical identity check
 7. blocker re-evaluation
 8. protected path / containment check
-9. Git remove default/single force
-10. post-Git containment recheck
-11. target-only no-follow cleanup
-12. partial cleanup result
+9. direct-child eligibility check; nested descendant blocker stops before mutation
+10. Git remove default/single force
+11. post-Git containment recheck
+12. target-only no-follow cleanup
+13. partial cleanup result
 
 ### 10.2 Test checkpoint `R1` — hard blockers × force
 
@@ -547,6 +553,7 @@ uv run pytest tests/unit/test_inventory.py tests/unit/test_target_resolver.py \
 - root/namespace/protected ancestor
 - record missing after refresh
 - target changed after refresh
+- nested managed descendant
 
 Git remove call countは`0`。
 
@@ -567,10 +574,12 @@ Git remove call countは`0`。
 - new duplicate ambiguity
 - target becomes bare/locked/current
 - namespace changes to symlink
+- nested managed descendant is observable but blocked before mutation; default/force both keep the target and any root-external sentinel unchanged
 
 wrong pathへのremove callは`0`。
-この checkpoint は検出可能な干渉に対する fail-closed を検証するものであり、非協調 process による final syscall
-window の rename を原子的に防止する証明ではない。脅威境界は `WTP-THREAT-001` と R6 の documentation contract で固定する。
+この checkpoint は nested target について parent-swap hook に到達せず fail-closed となることも検証する。検出可能な干渉に
+対する fail-closed を検証するものであり、非協調 process による final syscall window の rename を原子的に防止する証明では
+ない。脅威境界は `WTP-THREAT-001` と R6 の documentation contract で固定する。
 
 ### 10.5 Test checkpoint `R4` — Git-first
 
@@ -869,6 +878,7 @@ Installed artifact smokeとmacOS/Linux evidenceを添付する。
 - [ ] legacy env lookupなし
 - [ ] machine root defaultなし
 - [ ] namespace symlink create/remove拒否
+- [ ] nested managed descendant remove拒否（`nested_target_unsupported`、forceで解除不可）
 - [ ] external remove拒否
 - [ ] locked force拒否
 - [ ] default remove non-force
