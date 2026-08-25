@@ -122,13 +122,26 @@ worktree-provisioner remove <id-or-absolute-path-or-basename> \
   --repo /path/to/repository --root /path/to/worktrees
 ```
 
-`remove` は configured managed namespace 内の worktree だけを対象にします。main、現在使用中、bare、stale、external、
+`remove` は `WTP-THREAT-001` の脅威モデル内で configured managed namespace 内の worktree だけを対象にします。main、現在使用中、bare、stale、external、
 locked、unsafe namespace の record は削除できません。locked worktree は `--force` でも unlock しません。先に利用者が
 `git worktree unlock` を実行し、保護が解除されたことを確認してください。
 
 既定の削除は non-force です。dirty または untracked の変更を Git が拒否した場合、filesystem cleanup は行いません。明示的な
 強制削除が必要な場合だけ、同じ command に一度だけ `--force` を指定します。Git の削除成功後に残った target directory のみを
 no-follow で処理し、local branch の削除、remote 操作、`prune`、`repair` は行いません。
+
+### Safety threat model
+
+managed namespace の destructive scope 保証は `WTP-THREAT-001` の脅威モデルの範囲です。preflight の
+lexical / canonical containment、mutation 直前の inventory refresh、namespace symlink 拒否、descriptor-bound
+Git / filesystem operation、no-follow cleanup、mutation 後の containment / identity recheck を組み合わせて、協調的な
+tool operation と検出可能な path race を fail-closed または `partial` にします。
+
+同一ユーザーの外部・非協調 process が、最後の check の後かつ Git CLI / kernel syscall の前に managed root / namespace
+またはその ancestor inode を rename / replace することを、現在の Git CLI architecture のまま macOS / Linux 共通で
+原子的に禁止することはできません。この final syscall window は out of scope であり、atomic prevention や、未検出の
+race に対する destructive scope の絶対保証を主張しません。干渉を検出した場合は作成・削除を fail-closed または
+`partial` として報告し、保持された成果物を自動 rollback しません。
 
 ## Human and agent interfaces
 

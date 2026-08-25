@@ -43,6 +43,9 @@ language: ja
 - skillはCodex taskを作成・移動しない。
 - status/prune/repair/branch deletion/remote/GitHub/Workbenchを追加しない。
 - SpecDock-side workを追加しない。
+- managed namespace の destructive scope は `WTP-THREAT-001` の脅威モデル内で保証する。descriptor / refresh /
+  no-follow / post-check は race を縮小・検出するが、Git CLI / kernel syscall 前の非協調 ancestor rename に対する
+  atomic prevention は主張しない。
 
 ## 3. Recommended delivery sequence
 
@@ -566,6 +569,8 @@ Git remove call countは`0`。
 - namespace changes to symlink
 
 wrong pathへのremove callは`0`。
+この checkpoint は検出可能な干渉に対する fail-closed を検証するものであり、非協調 process による final syscall
+window の rename を原子的に防止する証明ではない。脅威境界は `WTP-THREAT-001` と R6 の documentation contract で固定する。
 
 ### 10.5 Test checkpoint `R4` — Git-first
 
@@ -586,7 +591,17 @@ wrong pathへのremove callは`0`。
 
 parent/root/namespace/main sentinelsが残る。
 
-### 10.7 Partial cleanup assertion
+### 10.7 Test checkpoint `R6` — documented threat boundary
+
+`WTP-THREAT-001` が requirement / design / plan、README、SKILL.md のすべてに存在し、次を同じ意味で記述している
+ことを contract test で固定する。
+
+- preflight、final refresh、namespace symlink / no-follow、descriptor-bound operation、post-check が supported guard である。
+- 検出した interference は fail-closed または partial で返し、既存の partial artifact を自動 rollback しない。
+- 同一ユーザーの外部・非協調 process による final syscall window の root / namespace ancestor rename は out of scope であり、
+  atomic prevention または未検出 race の絶対保証を主張しない。
+
+### 10.8 Partial cleanup assertion
 
 - exit `1`
 - status `partial`
@@ -595,14 +610,14 @@ parent/root/namespace/main sentinelsが残る。
 - `removed_directory=false`
 - `branch_deleted=false`
 
-### 10.8 Verification
+### 10.9 Verification
 
 ```bash
 uv run pytest tests/unit/test_remove.py tests/unit/test_filesystem.py \
   tests/integration/test_cli_remove.py -q
 ```
 
-### 10.9 Stop conditions
+### 10.10 Stop conditions
 
 - external targetを削除する。
 - `req.force`を無視する。
@@ -611,7 +626,7 @@ uv run pytest tests/unit/test_remove.py tests/unit/test_filesystem.py \
 - branch deletion/prune/repairを呼ぶ。
 - parent/namespace/rootをcleanupする。
 
-### 10.10 Gate `G6`
+### 10.11 Gate `G6`
 
 `WTP-AC-010`〜`WTP-AC-012`がpass。
 
@@ -775,6 +790,7 @@ SKILL.mdはmanual reviewer checklistも通す。
 - automatic bootstrap trust warning / `--no-bootstrap`
 - partial + exit `1`
 - managed-only remove
+- `WTP-THREAT-001` の race threat model、supported guards、非協調 ancestor rename の out-of-scope 境界
 - force/locked policy
 - JSON schema link/summary
 - skill install/use boundary
@@ -860,6 +876,7 @@ Installed artifact smokeとmacOS/Linux evidenceを添付する。
 - [ ] final refreshあり
 - [ ] Git failure後cleanupなし
 - [ ] target-only no-follow cleanup
+- [ ] `WTP-THREAT-001` を docs / README / SKILL に明記し、atomic preventionを主張しない
 - [ ] branch deletionなし
 - [ ] bootstrap failure partial/non-zero/no rollback
 - [ ] JSON one-document contract
@@ -992,7 +1009,7 @@ Repositoryは既にpublicであるが、次は別の明示authorityを必要と�
 | `WTP-RQ-020` platform support | Design §17.3 | P9, P10 | macOS/Linux CI; Windows not advertised |
 | `WTP-RQ-021` compatibility/provenance | Design §18, §21 | P1, P9 | scenario provenance; no differential parity/legacy support |
 | `WTP-RQ-022` prototype disposition | Design §18, §21 | P2, P7, P9 | no create-only monolith/legacy behavior/dead copy |
-| `WTP-NFR-001` safety | Design §19 invariants | P3-P10 | destructive matrix, subprocess/symlink/static audit |
+| `WTP-NFR-001` safety | Design §3.3, §9.3, §13.1, §19 (`WTP-THREAT-001`) | P3-P10 | destructive matrix, subprocess/symlink/static audit, threat-boundary documentation test |
 | `WTP-NFR-002` observability | Design §6, §11, §13.5, §14 | P4, P6, P7 | artifacts/partial/remove-state JSON tests |
 | `WTP-NFR-003` maintainability | Design §4-5, §18 | P2-P9 | Ruff/Mypy/Pytest, worktree-only boundaries |
 | `WTP-NFR-004` determinism | Design §12.2, §14 | P5, P7 | stable-id determinism and schema type tests |
@@ -1013,7 +1030,7 @@ Repositoryは既にpublicであるが、次は別の明示authorityを必要と�
 | `WTP-AC-009` target resolution | Design §12.4 | P5 | selector priority, duplicate IDs, candidates, branch rejection |
 | `WTP-AC-010` remove namespace boundary | Design §13.1-13.2 | P6 | managed success; external/main/current/bare/stale/symlink reject |
 | `WTP-AC-011` force/locked | Design §13.2-13.3 | P6 | default refusal, single force success, locked no-call matrix |
-| `WTP-AC-012` refresh/cleanup | Design §13.1, §13.4-13.5 | P6 | race cases, Git-first, no-follow target-only, partial cleanup |
+| `WTP-AC-012` refresh/cleanup | Design §13.1, §13.4-13.5; `WTP-THREAT-001` | P6, P9 | race cases, Git-first, no-follow target-only, partial cleanup, documented final-syscall boundary |
 | `WTP-AC-013` JSON/streams | Design §14-15 | P7 | schema/stream/usage-error contract suite |
 | `WTP-AC-014` human interface | Design §15 | P7 | default text, prefix/path, complete/partial streams and exits |
 | `WTP-AC-015` skill create | Design §16.3 | P8 | explicit/ambiguous/auto-id/partial/no-task cases |
@@ -1062,7 +1079,8 @@ Installed wheel smokeとskill wrapper fake-PATH testを追加する。
 - SpecDock repositoryへの変更が必要になった。
 - out-of-scope commandまたはremote lifecycleが混入した。
 - unexpected Git failureを安全に分類できず、retryを広げようとしている。
-- path containment/raceによりmanaged boundaryを証明できない。
+- `WTP-THREAT-001` の範囲で path containment / race guard を説明できず、または実装が非協調 final-syscall race の
+  atomic prevention を主張しようとしている。
 
 ## 20. Final completion criteria
 
@@ -1074,7 +1092,7 @@ Installed wheel smokeとskill wrapper fake-PATH testを追加する。
 4. create naming/collision/linked normalizationがpassする。
 5. bootstrap failureはretained + partial + exit1 + no rollbackである。
 6. list/showはexternalを観測できる。
-7. removeはmanaged namespace内だけである。
+7. removeは `WTP-THREAT-001` の脅威モデル内で managed namespaceだけを対象にする。
 8. default non-force、single explicit force、locked不可である。
 9. final refresh、Git-first、target-only no-follow cleanupがpassする。
 10. all error/partial contractsがversioned JSON testsで固定される。

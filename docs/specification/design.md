@@ -20,7 +20,7 @@ language: ja
 設計上の中心は次の5点である。
 
 1. **単一 command family**: `create`, `list`, `show`, `remove` を同じ inventory / target / namespace model で扱う。
-2. **管理境界**: inventory は同一 repository の外部 worktree も見せるが、remove は configured managed namespace 内だけを変更する。
+2. **管理境界**: inventory は同一 repository の外部 worktree も見せるが、`WTP-THREAT-001` の脅威モデル内で remove は configured managed namespace 内だけを変更する。
 3. **partial first-class**: bootstrap failure と post-remove cleanup failure は complete success にせず、成果物を残した `status=partial` と non-zero で返す。
 4. **agent contract**: default text と versioned JSON を分離し、agent は明示的な `--json` を使う。
 5. **skill thinness**: skill は authorization / fact check / result interpretation だけを持ち、PATH 上の installed CLI を thin wrapper で呼ぶ。
@@ -67,6 +67,20 @@ language: ja
 - skill source packaging path
 
 本設計は implementation-ready な reference layout を示すが、上記 local choice の合理的な簡素化は許容する。
+
+### 3.3 `WTP-THREAT-001` Namespace ancestor race boundary
+
+managed namespace の destructive scope は、管理 root / namespace を critical window に rename・replace しない
+協調的な tool operation を前提にする。実装は preflight の lexical / canonical containment、mutation 直前の Git
+inventory refresh、namespace symlink / no-follow guard、利用可能な場合の descriptor-bound Git / filesystem operation、
+mutation 後の containment / identity recheck を組み合わせて race を縮小する。
+
+これは atomic authorization ではない。現在の Git CLI argv architecture のままでは、同一ユーザーの外部・非協調 process が
+最後の bound check の後かつ Git CLI / kernel syscall の前に managed root / namespace またはその ancestor inode を
+rename・replace することを、macOS / Linux 共通の非特権 primitive で禁止できない。`WTP-THREAT-001` はこの final
+syscall window を out of scope とし、atomic prevention を主張しない。干渉を mutation 前に検出した場合は fail-closed、
+Git 後の recheck で検出した場合は partial とし、非協調 process の未検出 race について destructive scope の絶対保証を
+与えない。
 
 ## 4. Reference architecture
 
@@ -483,6 +497,10 @@ else:
 
 これにより namespace 内の symlink path が外部 directory を指すケースを managed と誤認しない。
 
+containment は inventory snapshot と再確認による race reduction であり、非協調 ancestor rename に対する原子的な
+排他ではない。descriptor は開いた directory inode に Git / cleanup の相対操作を束縛するが、namespace の path identity
+が critical window に変化すること自体を防止しない。
+
 ## 10. Create flow
 
 ```text
@@ -507,6 +525,10 @@ else:
 19. success: return ok
 20. execution failure: return partial + artifacts, exit 1
 ```
+
+descriptor-bound Git operation が利用できる場合は、開いた namespace inode に相対 target を束縛し、成功後に
+path identity を再確認する。この再確認は干渉の検出であり、最後の bound check と Git syscall の間に発生する
+非協調 ancestor rename を原子的に禁止するものではない。
 
 ### 10.1 Candidate generation
 
@@ -655,6 +677,11 @@ exact id は basename ambiguity より優先する。ambiguous candidatesは ful
 16. cleanup success: ok
 17. cleanup failure: partial, removed_record=true, removed_directory=false
 ```
+
+final refresh / bound check は mutation 前の race reduction である。Git remove 後の namespace / target recheck が
+干渉を検出した場合は cleanup を拡大せず `status=partial` とする。最後の check と Git syscall の間に非協調 process
+が root / namespace またはその ancestor inode を rename・replace する race は `WTP-THREAT-001` により out of scope
+であり、atomic prevention を主張しない。
 
 ### 13.2 Hard blockers
 
@@ -1025,7 +1052,7 @@ CI matrixはmacOS/Linuxを含める。Windows jobをrequiredにせず、README�
 | `INV-002` | namespace/basenameはmain record、branch prefixはinvocation checkoutを使う。 |
 | `INV-003` | rootはnew product configのみ。legacy envを読まない。 |
 | `INV-004` | namespace symlinkではcreate/removeしない。 |
-| `INV-005` | lexical + canonical containmentを満たさないrecordをmanagedとしない。 |
+| `INV-005` | lexical + canonical containmentを満たさないrecordをmanagedとしない。判定は snapshot / recheck による race reduction であり、atomic preventionではない。 |
 | `INV-006` | unknown Git failureをcollision retryしない。 |
 | `INV-007` | bootstrap failureをrollbackせず、partial/non-zeroで公開する。 |
 | `INV-008` | external/main/current/bare/locked/stale/unsafe targetをforceでも削除しない。 |
@@ -1039,6 +1066,7 @@ CI matrixはmacOS/Linuxを含める。Windows jobをrequiredにせず、README�
 | `INV-016` | skillはexplicit force intentなしに`--force`を使わない。 |
 | `INV-017` | tool/skillはCodex task lifecycleを変更しない。 |
 | `INV-018` | tool taskはSpecDock repositoryを変更しない。 |
+| `INV-019` | `WTP-THREAT-001` の final syscall window における非協調 ancestor rename は out of scope とし、検出時は fail-closed または partial で公開する。 |
 
 ## 20. Rejected alternatives
 

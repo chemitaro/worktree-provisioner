@@ -15,6 +15,19 @@ Git linked worktree を管理するための model-invoked skill です。実際
 - wrapper が exit `127` を返した場合は、CLI が installed でないか PATH 上にない installation problem と報告する。
 - Codex task の作成・移動、current task の変更、SpecDock lifecycle、GitHub/remote 操作はこの skill の仕事ではない。
 
+## Namespace race boundary (`WTP-THREAT-001`)
+
+managed namespace の destructive scope は、root / namespace を critical window に rename・replace しない協調的な
+tool operation を前提にします。CLI は preflight の lexical / canonical containment、mutation 直前の inventory refresh、
+namespace symlink / no-follow guard、利用可能な descriptor-bound Git / filesystem operation、mutation 後の containment /
+identity recheck を行います。検出した干渉は fail-closed または `status=partial` として扱い、skill はその結果を隠さず報告します。
+
+同一ユーザーの外部・非協調 process が最後の check の後かつ Git CLI / kernel syscall の前に managed root / namespace または
+その ancestor inode を rename / replace することを、現在の Git CLI architecture のまま macOS / Linux 共通で原子的に
+禁止することはできません。この final syscall window は out of scope であり、skill / CLI は atomic prevention や未検出
+race に対する destructive scope の絶対保証を主張しません。skill はこの境界を広げる lock、unlock、retry、rollback を
+追加実行しません。
+
 ## 事前確認
 
 1. 依頼が create/list/show/remove のどれかを分類する。

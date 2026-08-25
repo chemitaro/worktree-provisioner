@@ -66,7 +66,7 @@ SpecDock は機能・安全性・テスト観点の参照元に限定する。Sp
 - Git linked worktree の provisioning、inventory、target resolution、removal を単一の standalone CLI に集約する。
 - 長命の手動管理 worktree を central root 配下へ collision-safe に配置する。
 - human operator と agent が同じ command contract を使い、agent は text scraping をせず versioned JSON で操作結果を判断できるようにする。
-- destructive operation を configured managed namespace に限定し、main/current/locked/bare/stale/external worktree の誤削除を防ぐ。
+- `WTP-THREAT-001` の脅威モデル内で destructive operation を configured managed namespace に限定し、main/current/locked/bare/stale/external worktree の誤削除を防ぐ。
 - create と project-local initialization を分離して観測し、bootstrap failure 時に作成済み worktree を失わない。
 - SpecDock runtime や SpecDock固有 product contract に依存しない独立 package とする。
 
@@ -210,6 +210,8 @@ worktree-provisioner remove <TARGET> [--repo PATH] [--root PATH] [--force] [--js
   - `remove`: mutation 前に拒否する。
   - `list` / `show`: Git inventory は表示してよいが、managed classification を unavailable とし、removal eligibility を与えない。
 - containment 判定は lexical path だけでなく canonical path も確認する。
+- containment は snapshot と再確認による race reduction であり、`WTP-THREAT-001` の final syscall window に対する
+  atomic prevention または非協調 process への絶対保証を意味しない。
 
 ### `WTP-RQ-006` Layout and naming
 
@@ -288,7 +290,7 @@ preflight 後の `git worktree add` で発生した既知の path/branch/checked
 
 ### `WTP-RQ-012` Remove eligibility
 
-`remove` は次をすべて満たす target だけを変更できる。
+`remove` は、`WTP-THREAT-001` の脅威モデル内で、次をすべて満たす target だけを変更できる。
 
 - 同一 repository の Git linked worktree record である。
 - configured managed namespace 内に canonical containment される。
@@ -314,6 +316,8 @@ external worktree は `list` / `show` では可視だが、`outside_managed_name
 - Git remove 成功後に target path が残る場合だけ、containment を再検証して target-only cleanup を行う。
 - cleanup は `lstat` 相当で type を確認し、symlink target を follow しない。
 - parent、root、namespace、main repository を削除しない。
+- descriptor-bound operation が利用できる場合も、最後の bound check と Git / kernel mutation の間に発生する
+  非協調 ancestor rename を原子的に防止するとは主張しない。検出した干渉は fail-closed または `partial` として返す。
 - branch は削除せず、result の `branch_deleted` は常に `false` とする。
 - Git record removal 後の cleanup failure は exit `1`、JSON `status=partial`、`removed_record=true`, `removed_directory=false` とする。
 
@@ -450,13 +454,33 @@ Remove blocker codes:
 
 ### `WTP-NFR-001` Safety
 
-- destructive scope は managed namespace に限定する。
+- destructive scope は、`WTP-THREAT-001` の脅威モデルの範囲で managed namespace に限定する。
 - mutation 前 validation、mutation 直前 refresh、mutation 後 containment recheck を行う。
 - unknown Git failure を collision と誤分類しない。
 - subprocess は argv list、`shell=False` とする。
 - namespace symlink と locked worktree を fail-closed に扱う。
 - bootstrap failure、Git partial、cleanup partial を自動 rollback しない。
 - secret / environment file を複製しない。
+
+#### `WTP-THREAT-001` Namespace ancestor race boundary
+
+「destructive scope は managed namespace に限定する」という保証は、管理 root / namespace を同時に
+rename・replace しない協調的な tool operation と、通常の非協調 process がこの境界を変更しない脅威モデルを
+前提とする。対象操作は次の safety guard を持つ。
+
+- preflight で lexical / canonical containment、namespace type、symlink、protected path を検証する。
+- mutation 直前に Git inventory と namespace を refresh し、target identity と blocker を再評価する。
+- namespace symlink を拒否し、descriptor-bound Git / filesystem operation と no-follow cleanup を利用できる環境では
+  開いた directory inode に操作を束縛する。
+- mutation 後に canonical containment と namespace identity を再確認し、検出した干渉は fail-closed error または
+  `status=partial` として公開する。部分成果物を自動削除しない。
+
+任意の同一ユーザーの外部・非協調 process が、最後の check の後かつ Git CLI / kernel syscall の前に managed root または
+namespace の ancestor inode を rename / replace することを、現在の Git CLI argv architecture のまま macOS / Linux
+共通の非特権 primitive で原子的に禁止することはできない。この final syscall window は明示的に out of scope であり、
+本 tool はその race の atomic prevention を主張しない。干渉を mutation 前に検出できた場合は fail-closed、Git 後の
+再確認で検出した場合は partial とし、非協調 process による未検出の rename / replace について destructive scope の
+絶対保証を与えない。
 
 ### `WTP-NFR-002` Observability
 
@@ -665,6 +689,7 @@ owner decisions は完了している。次は product decision ではなく、�
 - Protocol / dataclass の内部名称
 - Git version / locale 差を隔離する retryable collision classifier の内部実装
 - namespace race を縮小する `lstat` / descriptor / canonical recheck の具体方式
+- `WTP-THREAT-001` の脅威モデルを変更しない限り、非協調 ancestor rename の atomic prevention を追加実装しない
 - skill source の repository 内配置と host skill directory への install packaging
 - CI provider 上の macOS/Linux matrix version
 

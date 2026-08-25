@@ -144,6 +144,15 @@
       "acceptance_criteria": ["WTP-AC-005", "WTP-AC-020"],
       "reference_symbols": ["OD-005", "INV-003"],
       "intentional_changes": ["run every subprocess with exact root variables, not host defaults"]
+    },
+    {
+      "id": "P1-S16",
+      "name": "namespace_ancestor_race_threat_boundary_is_documented",
+      "test": "tests/unit/test_scenario_provenance.py::test_namespace_ancestor_race_boundary_is_documented",
+      "requirements": ["WTP-RQ-005", "WTP-RQ-013", "WTP-NFR-001"],
+      "acceptance_criteria": ["WTP-AC-005", "WTP-AC-010", "WTP-AC-012"],
+      "reference_symbols": ["WTP-THREAT-001", "INV-004", "INV-005", "INV-009", "INV-010", "INV-011", "INV-019"],
+      "intentional_changes": ["document descriptor/recheck race reduction without claiming atomic prevention against non-cooperating ancestor rename"]
     }
   ],
   "acceptance_criteria_mapping": {
@@ -151,14 +160,14 @@
     "WTP-AC-002": ["P1-S01", "P1-S03"],
     "WTP-AC-003": ["P1-S03"],
     "WTP-AC-004": ["P1-S04"],
-    "WTP-AC-005": ["P1-S02", "P1-S11", "P1-S15"],
+    "WTP-AC-005": ["P1-S02", "P1-S11", "P1-S15", "P1-S16"],
     "WTP-AC-006": ["P1-S05"],
     "WTP-AC-007": ["P1-S05"],
     "WTP-AC-008": ["P1-S06"],
     "WTP-AC-009": ["P1-S07"],
-    "WTP-AC-010": ["P1-S08", "P1-S11"],
+    "WTP-AC-010": ["P1-S08", "P1-S11", "P1-S16"],
     "WTP-AC-011": ["P1-S09", "P1-S10"],
-    "WTP-AC-012": ["P1-S09"],
+    "WTP-AC-012": ["P1-S09", "P1-S16"],
     "WTP-AC-013": ["P1-S07", "P1-S12"],
     "WTP-AC-014": ["P1-S12"],
     "WTP-AC-015": ["P1-S14"],
