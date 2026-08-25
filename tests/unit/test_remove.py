@@ -17,6 +17,7 @@ from worktree_provisioner.application.ports import ApplicationPorts
 from worktree_provisioner.application.worktree_service import WorktreeService
 from worktree_provisioner.infra.environment import EnvironmentAdapter
 from worktree_provisioner.infra.filesystem import DirectoryHandle, FilesystemCliGateway
+from worktree_provisioner.presentation.json_v1 import error_document
 
 
 def _service(git: FakeGitGateway, filesystem: FilesystemCliGateway | None = None) -> WorktreeService:
@@ -211,6 +212,97 @@ def test_git_failure_does_not_call_filesystem_cleanup(tmp_path: Path) -> None:
         _service(git).remove(_request(repo, root, target))
 
     assert caught.value.code == "git_worktree_remove_failed"
+    assert caught.value.status == "error"
+    assert caught.value.result is None
+    assert target.is_dir()
+
+
+def test_git_failure_after_record_removal_reports_partial_without_cleanup(tmp_path: Path) -> None:
+    repo, root, target, base_git = _fixture(tmp_path)
+    state = {"removed": False}
+
+    class RecordRemovedThenFails(FakeGitGateway):
+        def remove_worktree(self, repo_root: Path, *, path: Path, force: bool) -> None:
+            self._record("remove_worktree", repo_root, path=path, force=force)
+            self.records = [record for record in self.records if record.path != path]
+            state["removed"] = True
+            raise RuntimeError("Git removed the record but could not remove the directory")
+
+    class TrackingFilesystem(FilesystemCliGateway):
+        cleanup_calls = 0
+
+        def remove_target_no_follow(self, path: Path) -> None:
+            self.cleanup_calls += 1
+            super().remove_target_no_follow(path)
+
+        def remove_target_no_follow_bound(self, directory: DirectoryHandle, path: Path) -> None:
+            self.cleanup_calls += 1
+            super().remove_target_no_follow_bound(directory, path)
+
+    git = RecordRemovedThenFails(
+        checkout_root=base_git.checkout_root,
+        records=list(base_git.records),
+        branches=set(base_git.branches),
+    )
+    filesystem = TrackingFilesystem()
+
+    with pytest.raises(ExpectedError) as caught:
+        _service(git, filesystem).remove(_request(repo, root, target))
+
+    assert state["removed"]
+    assert caught.value.code == "git_worktree_remove_partial"
+    assert caught.value.status == "partial"
+    result = cast(RemoveResult, caught.value.result)
+    assert result.removed_record is True
+    assert result.removed_directory is False
+    assert result.branch_deleted is False
+    assert target.is_dir()
+    assert filesystem.cleanup_calls == 0
+    assert len([call for call in git.calls if call[0] == "worktree_list"]) == 3
+    document = error_document(caught.value)
+    assert document["status"] == "partial"
+    assert document["operation"] == "remove"
+    envelope_result = cast(dict[str, object], document["result"])
+    assert envelope_result["removed_record"] is True
+    assert envelope_result["removed_directory"] is False
+    envelope_error = cast(dict[str, object], document["error"])
+    assert envelope_error["code"] == "git_worktree_remove_partial"
+
+
+def test_remove_failure_observation_error_keeps_primary_git_diagnostic(tmp_path: Path) -> None:
+    repo, root, target, base_git = _fixture(tmp_path)
+    state = {"removed": False}
+
+    class RemovingGit(FakeGitGateway):
+        def remove_worktree(self, repo_root: Path, *, path: Path, force: bool) -> None:
+            self._record("remove_worktree", repo_root, path=path, force=force)
+            state["removed"] = True
+            raise RuntimeError("primary Git refusal")
+
+    class FailingObservationFilesystem(FilesystemCliGateway):
+        def lstat_kind(self, path: Path) -> str:
+            if path == target and state["removed"]:
+                raise PermissionError("post-failure inspection denied")
+            return super().lstat_kind(path)
+
+        def remove_target_no_follow_bound(self, directory: DirectoryHandle, path: Path) -> None:
+            raise AssertionError("cleanup must not run after Git failure")
+
+    git = RemovingGit(
+        checkout_root=base_git.checkout_root,
+        records=list(base_git.records),
+        branches=set(base_git.branches),
+    )
+
+    with pytest.raises(ExpectedError) as caught:
+        _service(git, FailingObservationFilesystem()).remove(_request(repo, root, target))
+
+    assert caught.value.code == "git_worktree_remove_failed"
+    assert caught.value.status == "error"
+    assert caught.value.result is None
+    assert caught.value.details["diagnostic"] == "primary Git refusal"
+    observation = cast(dict[str, object], caught.value.details["observation"])
+    assert observation["target_lstat_error"] == "post-failure inspection denied"
     assert target.is_dir()
 
 

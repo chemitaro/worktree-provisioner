@@ -317,16 +317,45 @@ class WorktreeService:
                 force=request.force,
             )
         except Exception as exc:
-            # No filesystem cleanup may happen on a Git refusal/failure.
+            # No filesystem cleanup may happen on a Git refusal/failure.  A
+            # Git implementation can nevertheless remove its administrative
+            # record before failing to remove the directory.  Refresh the
+            # inventory and inspect the target with lstat only so that this
+            # observable partial mutation is not reported as an ordinary
+            # failure.  If either observation fails, retain the primary Git
+            # diagnostic and keep the historical error/result contract.
+            record_exists, target_kind, observation = self._observe_remove_failure(
+                request.repo_root,
+                target=refreshed.path,
+            )
+            details: dict[str, object] = {
+                "target": request.target,
+                "path": str(refreshed.path),
+                "force_requested": request.force,
+                "diagnostic": _bounded(str(exc)),
+                "observation": observation,
+            }
+            if record_exists is False and target_kind == "directory":
+                raise self._error(
+                    code="git_worktree_remove_partial",
+                    message="git worktree record was removed but target directory was retained",
+                    details=details,
+                    result=RemoveResult(
+                        target=request.target,
+                        resolved_target=refreshed,
+                        force_requested=request.force,
+                        removed_record=True,
+                        removed_directory=False,
+                        branch_deleted=False,
+                    ),
+                    status="partial",
+                    operation="remove",
+                ) from exc
+
             raise self._error(
                 code="git_worktree_remove_failed",
                 message=f"git worktree remove failed for {refreshed.path}",
-                details={
-                    "target": request.target,
-                    "path": str(refreshed.path),
-                    "force_requested": request.force,
-                    "diagnostic": _bounded(str(exc)),
-                },
+                details=details,
                 operation="remove",
             ) from exc
 
@@ -362,6 +391,48 @@ class WorktreeService:
             removed_directory=True,
             branch_deleted=False,
         )
+
+    def _observe_remove_failure(
+        self,
+        repo_root: Path,
+        *,
+        target: Path,
+    ) -> tuple[bool | None, str | None, dict[str, object]]:
+        """Observe Git removal state without attempting filesystem cleanup."""
+
+        observation: dict[str, object] = {}
+        record_exists: bool | None = None
+        target_kind: str | None = None
+
+        try:
+            records = self.ports.git.worktree_list(repo_root)
+        except Exception as exc:
+            observation["inventory_error"] = _bounded(str(exc))
+        else:
+            try:
+                canonical_target = canonical_path(target)
+                record_exists = any(_record_canonical_path(record) == canonical_target for record in records)
+            except Exception as exc:
+                observation["inventory_error"] = _bounded(str(exc))
+            else:
+                observation["record_exists"] = record_exists
+
+        try:
+            kind = self.ports.filesystem.lstat_kind(target)
+        except Exception as exc:
+            observation["target_lstat_error"] = _bounded(str(exc))
+        else:
+            target_kind = kind
+            observation["target_kind"] = kind
+            observation["target_exists"] = kind != "missing"
+
+        if "record_exists" not in observation:
+            observation["record_exists"] = record_exists
+        if "target_kind" not in observation:
+            observation["target_kind"] = target_kind
+        if "target_exists" not in observation:
+            observation["target_exists"] = None if target_kind is None else target_kind != "missing"
+        return record_exists, target_kind, observation
 
     def _validate_remove_namespace(self, root: Path, repo_basename: str) -> Path:
         """Validate a remove namespace before inventory or mutation."""

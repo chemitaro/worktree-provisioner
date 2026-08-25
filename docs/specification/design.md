@@ -671,7 +671,7 @@ exact id は basename ambiguity より優先する。ambiguous candidatesは ful
 10. recalculate blockers; any blocker => stop
 11. recheck protected paths / containment
 12. git worktree remove [--force] <path>
-13. on Git failure: return error; no filesystem cleanup
+13. on Git failure: no filesystem cleanup; best-effort read-only inventory refresh and target `lstat` observation may classify partial state
 14. recheck containment
 15. if target remains: target-only no-follow cleanup
 16. cleanup success: ok

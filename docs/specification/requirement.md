@@ -312,7 +312,7 @@ external worktree は `list` / `show` では可視だが、`outside_managed_name
 - double force、自動 unlock、`git worktree prune`、branch deletion を実行しない。
 - locked record は Git command を呼ぶ前に `locked_worktree` blocker で拒否する。
 - initial resolve 後、mutation 直前に Git records を再取得し、target と blockers を再評価する。
-- Git remove が失敗した場合は filesystem cleanup を実行しない。
+- Git remove が失敗した場合は filesystem cleanup、rollback、retry を実行せず、read-only の Git inventory refresh と target `lstat`（no-follow）observation のみ best-effort で許可する。
 - Git remove 成功後に target path が残る場合だけ、containment を再検証して target-only cleanup を行う。
 - cleanup は `lstat` 相当で type を確認し、symlink target を follow しない。
 - parent、root、namespace、main repository を削除しない。
@@ -385,6 +385,7 @@ Error codes:
 - `unsupported_branch_target`
 - `remove_blocked`
 - `git_worktree_remove_failed`
+- `git_worktree_remove_partial`
 - `post_remove_cleanup_failed`
 - `internal_error`
 
@@ -459,7 +460,7 @@ Remove blocker codes:
 - unknown Git failure を collision と誤分類しない。
 - subprocess は argv list、`shell=False` とする。
 - namespace symlink と locked worktree を fail-closed に扱う。
-- bootstrap failure、Git partial、cleanup partial を自動 rollback しない。
+- bootstrap failure、Git partial、cleanup partial を自動 rollback しない。Git failure 後の partial 判定は read-only observation に限定する。
 - secret / environment file を複製しない。
 
 #### `WTP-THREAT-001` Namespace ancestor race boundary
@@ -486,6 +487,7 @@ namespace の ancestor inode を rename / replace することを、現在の Gi
 
 - result は id、path、branch、bootstrap、artifact state、remove state を構造化する。
 - false と unknown を区別する。
+- Git failure 後に観測不能となった場合は unknown とし、primary Git diagnostic を維持する。record 消失と directory 残存の双方を確認できた場合だけ partial result を返す。
 - agent が exit code と JSON だけで complete / partial / error を識別できる。
 - human text でも partial artifact の所在を把握できる。
 
@@ -590,7 +592,7 @@ namespace の ancestor inode を rename / replace することを、現在の Gi
 ### `WTP-AC-012` Remove refresh and cleanup
 
 - target disappearance、path change、new ambiguity、new blocker を final refresh で検出する。
-- Git remove failure 後は filesystem inspection/cleanup を行わない。
+- Git remove failure 後は filesystem cleanup を行わず、read-only の inventory refresh と target `lstat` observation のみ best-effort で許可する。
 - Git success 後の leftover directory / symlink / broken symlink / regular file を target-only で処理する。
 - parent/root/namespace/main repo sentinel は残る。
 - cleanup failure は `status=partial`, exit `1`, `removed_record=true`, `removed_directory=false`。

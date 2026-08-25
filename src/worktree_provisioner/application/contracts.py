@@ -50,6 +50,7 @@ ErrorCode: TypeAlias = Literal[
     "unsupported_branch_target",
     "remove_blocked",
     "git_worktree_remove_failed",
+    "git_worktree_remove_partial",
     "post_remove_cleanup_failed",
     "internal_error",
 ]

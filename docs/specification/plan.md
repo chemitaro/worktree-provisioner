@@ -574,7 +574,7 @@ window の rename を原子的に防止する証明ではない。脅威境界�
 
 ### 10.5 Test checkpoint `R4` — Git-first
 
-- Git remove failure -> filesystem gateway call `0`
+- Git remove failure -> filesystem cleanup gateway call `0`; read-only inventory refresh and target `lstat` observation are allowed
 - no cleanup before Git success
 - surfaced Git error is bounded/redacted
 
