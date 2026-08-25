@@ -459,7 +459,7 @@ def _database_facts(output: str, target: str) -> tuple[bool, bool] | None:
         current_has_commands = False
         for line in lines[start + 1 : end]:
             if not line or line.startswith("#") or line.startswith("\t"):
-                if line.startswith("#  commands to execute") and current_header == ".DEFAULT":
+                if line.startswith(("#  commands to execute", "#  recipe to execute")) and current_header == ".DEFAULT":
                     current_has_commands = True
                 continue
             header, separator, _ = line.partition(":")
