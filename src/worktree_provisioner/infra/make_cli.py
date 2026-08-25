@@ -457,9 +457,7 @@ def _database_facts(output: str, target: str) -> tuple[bool, bool] | None:
                     continue
                 if implicit_matches_target and not implicit_is_builtin:
                     has_fallback_rule = True
-                implicit_matches_target = any(
-                    _pattern_matches_target(pattern, target) for pattern in header.split()
-                )
+                implicit_matches_target = any(_pattern_matches_target(pattern, target) for pattern in header.split())
                 implicit_is_builtin = False
             if implicit_matches_target and not implicit_is_builtin:
                 has_fallback_rule = True

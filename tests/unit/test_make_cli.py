@@ -387,10 +387,7 @@ def test_real_make_database_probe_preserves_makeflags_target_conditionals(tmp_pa
     if shutil.which("make") is None:
         pytest.skip("make is unavailable")
     (tmp_path / "Makefile").write_text(
-        "ifeq (,$(findstring r,$(MAKEFLAGS)))\n"
-        "init:\n"
-        "\t@touch conditional-init\n"
-        "endif\n",
+        "ifeq (,$(findstring r,$(MAKEFLAGS)))\ninit:\n\t@touch conditional-init\nendif\n",
         encoding="utf-8",
     )
 
