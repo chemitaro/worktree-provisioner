@@ -23,7 +23,9 @@ _MAKE_COMMAND: Final[str] = "make"
 _DIAGNOSTIC_LIMIT: Final[int] = 4096
 _STREAM_CHUNK_SIZE: Final[int] = 8192
 _MAKEFILE_NAMES: Final[tuple[str, ...]] = ("GNUmakefile", "makefile", "Makefile")
-_STATIC_MAKEFILE_LIMIT: Final[int] = 1024 * 1024
+_DATABASE_OUTPUT_LIMIT: Final[int] = 1024 * 1024
+_DATABASE_START_MARKER: Final[str] = "# Files"
+_DATABASE_END_MARKER: Final[str] = "# Finished Make data base"
 
 
 class MakeRunner(Protocol):
@@ -88,9 +90,9 @@ class MakeCliGateway:
         """Return the bootstrap state for one already-created worktree."""
 
         target = _validated_worktree_path(worktree_path)
-        # Keep the public detection command stable.  A non-zero direct result
-        # is only downgraded to ``skipped`` when this repository file is
-        # statically obvious to contain no init target.
+        # Keep the public detection command stable.  The direct command uses
+        # Make's normal goal/prerequisite/remake semantics; the database probe
+        # below supplies the structural target fact without parsing source.
         detection_argv = (self.make_executable, "-n", "init")
         try:
             makefile = _find_standard_makefile(target)
@@ -115,7 +117,7 @@ class MakeCliGateway:
             )
 
         try:
-            detected, has_init_target = self._run_detection(detection_argv, target)
+            detected, runner_has_init_target = self._run_detection(detection_argv, target)
         except OSError as exc:
             return BootstrapResult(
                 requested=True,
@@ -126,29 +128,91 @@ class MakeCliGateway:
             )
 
         detection_detail = _diagnostic(detected.stdout, detected.stderr)
-        if detected.returncode != 0:
-            if self.runner is None and _static_init_rule_state(makefile) == "absent":
+        if self.runner is not None:
+            # The injectable runner is intentionally a narrow unit-test seam:
+            # its synthetic stdout remains the only structural input there.
+            # Production never uses this text heuristic.
+            if detected.returncode != 0:
+                return BootstrapResult(
+                    requested=True,
+                    status="detection_failed",
+                    command=detection_argv,
+                    exit_code=detected.returncode,
+                    detail=detection_detail or "make init detection failed",
+                )
+            if not runner_has_init_target:
                 return _skipped()
-            return BootstrapResult(
-                requested=True,
-                status="detection_failed",
-                command=detection_argv,
-                exit_code=detected.returncode,
-                detail=detection_detail or "make init detection failed",
-            )
-        static_state = _static_init_rule_state(makefile)
-        if static_state == "absent":
-            return _skipped()
-        if static_state == "unknown":
-            return BootstrapResult(
-                requested=True,
-                status="detection_failed",
-                command=detection_argv,
-                exit_code=detected.returncode,
-                detail=detection_detail or "make init target detection was inconclusive",
-            )
-        if not has_init_target:
-            return _skipped()
+        else:
+            try:
+                database = _run_database_probe(self.make_executable, target)
+            except OSError as exc:
+                return BootstrapResult(
+                    requested=True,
+                    status="detection_failed",
+                    command=detection_argv,
+                    exit_code=None,
+                    detail=_safe_bounded(str(exc)),
+                )
+
+            database_detail = _diagnostic(None, database.stderr)
+            if database.returncode != 0:
+                return BootstrapResult(
+                    requested=True,
+                    status="detection_failed",
+                    command=detection_argv,
+                    exit_code=detected.returncode,
+                    detail=database_detail or detection_detail or "make init database detection failed",
+                )
+            database_facts = _database_facts(database.stdout, "init")
+            if database_facts is None:
+                return BootstrapResult(
+                    requested=True,
+                    status="detection_failed",
+                    command=detection_argv,
+                    exit_code=detected.returncode,
+                    detail=detection_detail or "make init database detection was inconclusive",
+                )
+            if any(name in os.environ for name in _MAKE_AUTHORITY_VARIABLES):
+                return BootstrapResult(
+                    requested=True,
+                    status="detection_failed",
+                    command=detection_argv,
+                    exit_code=detected.returncode,
+                    detail="make environment altered target detection",
+                )
+            has_init_target, has_fallback_rule = database_facts
+            if not has_init_target:
+                # A missing goal is a valid absence proof only when Make's
+                # database parsed successfully.  A pre-existing path is also
+                # a valid no-rule case: Make reports it as up to date even
+                # though it has no database rule entry.
+                if detected.returncode != 0:
+                    if has_fallback_rule:
+                        return BootstrapResult(
+                            requested=True,
+                            status="detection_failed",
+                            command=detection_argv,
+                            exit_code=detected.returncode,
+                            detail=detection_detail or "make init detection failed",
+                        )
+                    return _skipped()
+                if (target / "init").exists():
+                    return _skipped()
+                return BootstrapResult(
+                    requested=True,
+                    status="detection_failed",
+                    command=detection_argv,
+                    exit_code=detected.returncode,
+                    detail=detection_detail or "make init target detection was inconclusive",
+                )
+            if detected.returncode != 0:
+                return BootstrapResult(
+                    requested=True,
+                    status="detection_failed",
+                    command=detection_argv,
+                    exit_code=detected.returncode,
+                    detail=detection_detail or "make init detection failed",
+                )
 
         execution_argv = (self.make_executable, "init")
         try:
@@ -203,7 +267,7 @@ class MakeCliGateway:
 
         if self.runner is not None:
             # The injected runner is a test seam; production uses the direct
-            # process path below and the static proof after its failure.
+            # process path below and the Make database probe after it.
             raw = self.runner(
                 list(argv),
                 cwd=cwd,
@@ -214,7 +278,7 @@ class MakeCliGateway:
             )
             has_init_target = _contains_make_target(raw.stdout if isinstance(raw.stdout, str) else "", "init")
             return _bounded_completed_process(raw), has_init_target
-        return _run_direct_detection(self.make_executable, cwd)
+        return _run_direct_detection(self.make_executable, cwd), False
 
 
 MakeGateway = MakeCliGateway
@@ -334,173 +398,97 @@ def _bounded_completed_process(completed: subprocess.CompletedProcess[str]) -> s
     )
 
 
-_UNSAFE_MAKE_DIRECTIVE = re.compile(
-    r"^(?:-?include|sinclude|if|ifdef|ifndef|ifeq|ifneq|else|endif|define|endef|"
-    r"override|export|unexport|private|vpath|load|unload|undefine)\b",
-    re.IGNORECASE,
-)
-_MAKE_ASSIGNMENT = re.compile(r"^(?P<name>[A-Za-z_][A-Za-z0-9_.-]*)\s*(?::=|\?=|\+=|!=|=)")
 _MAKE_AUTHORITY_VARIABLES = frozenset({"MAKEFLAGS", "MAKEOVERRIDES", "GNUMAKEFLAGS", "MAKEFILES", "MAKEFILE_LIST"})
 
 
-def _run_direct_detection(make_executable: str, cwd: Path) -> tuple[subprocess.CompletedProcess[str], bool]:
-    """Run the sole dynamic target check without changing Make state."""
+def _run_direct_detection(make_executable: str, cwd: Path) -> subprocess.CompletedProcess[str]:
+    """Run Make's normal dry-run graph evaluation for the ``init`` goal."""
 
-    direct = _run_bounded_process((make_executable, "-n", "init"), cwd)
-    return direct, direct.returncode == 0
-
-
-def _static_init_rule_state(makefile: Path) -> str:
-    """Classify source facts needed after direct Make evaluation."""
-
-    if any(name in os.environ for name in _MAKE_AUTHORITY_VARIABLES):
-        return "unknown"
-    found, safe = _scan_static_makefile(makefile, seen=set(), cwd=makefile.absolute().parent)
-    if found:
-        return "present"
-    return "absent" if safe else "unknown"
+    return _run_bounded_process((make_executable, "-n", "init"), cwd)
 
 
-def _scan_static_makefile(makefile: Path, *, seen: set[Path], cwd: Path) -> tuple[bool, bool]:
-    """Return whether an explicit init rule was found and absence is safe."""
+def _run_database_probe(make_executable: str, cwd: Path) -> subprocess.CompletedProcess[str]:
+    """Print Make's parsed database without selecting a repository target.
 
-    logical_path = makefile.absolute()
-    try:
-        identity = logical_path.resolve(strict=True)
-    except OSError:
-        return False, False
-    if identity in seen:
-        return False, False
-    seen.add(identity)
-    try:
-        with identity.open("rb") as stream:
-            source = stream.read(_STATIC_MAKEFILE_LIMIT + 1)
-    except OSError:
-        return False, False
-    if len(source) > _STATIC_MAKEFILE_LIMIT or b"\0" in source:
-        return False, False
-    try:
-        text = source.decode("utf-8")
-    except UnicodeDecodeError:
-        return False, False
-    if "\ufeff" in text:
-        return False, False
+    ``.`` is an existing goal, so this probe does not invoke the repository's
+    default target.  Overriding ``MAKECMDGOALS`` keeps conditionals written for
+    ``make init`` in the same branch as the direct probe.  ``-p`` is GNU Make's
+    own structural view; the adapter only reads the resulting database.
+    """
 
-    found = False
-    safe = True
-    pending_rule = False
-    assignment_after_rule = False
-    recipe_active = False
-    for raw_line in text.splitlines():
-        line = raw_line.rstrip("\r")
-        if _has_line_continuation(line):
-            safe = False
-        if line.startswith("\t"):
-            if assignment_after_rule or (not pending_rule and not recipe_active):
-                safe = False
-            if "$" in line or any(name in line for name in _MAKE_AUTHORITY_VARIABLES | {"origin"}):
-                safe = False
-            recipe_active = True
-            pending_rule = False
+    return _run_bounded_process(
+        (make_executable, "-n", "-p", "-r", "-R", "MAKECMDGOALS=init", "."),
+        cwd,
+        retain_limit=_DATABASE_OUTPUT_LIMIT,
+    )
+
+
+def _database_facts(output: str, target: str) -> tuple[bool, bool] | None:
+    """Return explicit target and fallback facts from Make's database.
+
+    The database is delimited by stable GNU Make markers.  Looking only at
+    rule headers in that section avoids treating ``$(info init:)`` or a
+    diagnostic as a target.  ``None`` means the output was truncated or was
+    not a database, which is a detection failure rather than an absence proof.
+    The fallback fact covers pattern/default rules whose failure can otherwise
+    be mistaken for an absent ``init`` target.
+    """
+
+    lines = output.splitlines()
+    starts = [index for index, line in enumerate(lines) if line == _DATABASE_START_MARKER]
+    for start in reversed(starts):
+        end = next(
+            (index for index in range(start + 1, len(lines)) if lines[index].startswith(_DATABASE_END_MARKER)),
+            None,
+        )
+        if end is None:
             continue
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        semantic = line.split("#", 1)[0].strip()
-        if not semantic:
-            continue
+        has_target = False
+        has_fallback_rule = False
 
-        include = _static_include_path(semantic, cwd=cwd, parent=logical_path.parent)
-        if include is not None:
-            child_found, child_safe = _scan_static_makefile(include, seen=seen, cwd=cwd)
-            found |= child_found
-            safe &= child_safe
-            recipe_active = False
-            continue
-        if _is_include_directive(semantic):
-            safe = False
-            recipe_active = False
-            continue
-        if "$" in semantic or "%" in semantic:
-            safe = False
-        if _UNSAFE_MAKE_DIRECTIVE.match(semantic):
-            safe = False
+        implicit_start = next(
+            (index for index in range(start - 1, -1, -1) if lines[index] == "# Implicit Rules"),
+            None,
+        )
+        if implicit_start is not None:
+            for line in lines[implicit_start + 1 : start]:
+                if line and not line.startswith("#") and not line.startswith("\t") and ":" in line:
+                    has_fallback_rule = True
 
-        assignment = _MAKE_ASSIGNMENT.match(semantic)
-        if assignment is not None:
-            if assignment.group("name") in _MAKE_AUTHORITY_VARIABLES:
-                safe = False
-            if ":" in semantic[assignment.end() :]:
-                safe = False
-            if pending_rule:
-                assignment_after_rule = True
-            recipe_active = False
-            continue
-
-        colon = semantic.find(":")
-        if colon < 1:
-            safe = False
-            recipe_active = False
-            continue
-        left = semantic[:colon].strip()
-        if not left or "\\" in left:
-            safe = False
-        if left == ".PHONY":
-            if "init" in semantic[colon + 1 :].split():
-                found = True
-            pending_rule = True
-            assignment_after_rule = False
-            recipe_active = False
-            continue
-        if left.startswith("."):
-            safe = False
-        if "init" in left.split():
-            found = True
-        if "=" in semantic[colon + 1 :]:
-            safe = False
-        if any(_is_makefile_target(token) for token in left.split()):
-            safe = False
-        if ":" in semantic[colon + 1 :]:
-            safe = False
-        pending_rule = True
-        assignment_after_rule = False
-        recipe_active = False
-
-    return found, safe
+        current_header: str | None = None
+        current_has_commands = False
+        for line in lines[start + 1 : end]:
+            if not line or line.startswith("#") or line.startswith("\t"):
+                if line.startswith("#  commands to execute") and current_header == ".DEFAULT":
+                    current_has_commands = True
+                continue
+            header, separator, _ = line.partition(":")
+            if not separator:
+                continue
+            if current_header == ".DEFAULT" and current_has_commands:
+                has_fallback_rule = True
+            current_header = header
+            current_has_commands = False
+            if header.startswith("."):
+                continue
+            if target in header.split():
+                has_target = True
+        if current_header == ".DEFAULT" and current_has_commands:
+            has_fallback_rule = True
+        return has_target, has_fallback_rule
+    return None
 
 
-def _static_include_path(semantic: str, *, cwd: Path, parent: Path) -> Path | None:
-    match = re.match(r"^(?:-?include|sinclude)\s+(.+)$", semantic, flags=re.IGNORECASE)
-    if match is None:
-        return None
-    value = match.group(1).strip()
-    prefix = "$(dir $(lastword $(MAKEFILE_LIST)))"
-    relative_to_makefile = value.startswith(prefix)
-    if relative_to_makefile:
-        value = value[len(prefix) :].strip()
-    if not value or "$" in value or any(char in value for char in "*?["):
-        return None
-    candidate = Path(value)
-    if candidate.is_absolute():
-        return candidate
-    return (parent if relative_to_makefile else cwd) / candidate
+def _database_has_target(output: str, target: str) -> bool | None:
+    """Compatibility wrapper for callers that only need target presence."""
+
+    facts = _database_facts(output, target)
+    return None if facts is None else facts[0]
 
 
-def _is_include_directive(semantic: str) -> bool:
-    return re.match(r"^(?:-?include|sinclude)\b", semantic, flags=re.IGNORECASE) is not None
-
-
-def _is_makefile_target(token: str) -> bool:
-    return token in _MAKEFILE_NAMES or Path(token).name in _MAKEFILE_NAMES
-
-
-def _has_line_continuation(line: str) -> bool:
-    candidate = line.rstrip()
-    trailing_backslashes = len(candidate) - len(candidate.rstrip("\\"))
-    return trailing_backslashes % 2 == 1
-
-
-def _run_bounded_process(argv: tuple[str, ...], cwd: Path) -> subprocess.CompletedProcess[str]:
+def _run_bounded_process(
+    argv: tuple[str, ...], cwd: Path, *, retain_limit: int = _DIAGNOSTIC_LIMIT
+) -> subprocess.CompletedProcess[str]:
     """Run a command while draining both pipes and retaining only a prefix.
 
     ``subprocess.run(capture_output=True)`` must not be used here: it retains
@@ -533,8 +521,8 @@ def _run_bounded_process(argv: tuple[str, ...], cwd: Path) -> subprocess.Complet
                     stream.close()
                     continue
                 retained = streams[stream.fileno()]
-                if len(retained) < _DIAGNOSTIC_LIMIT:
-                    retained.extend(chunk[: _DIAGNOSTIC_LIMIT - len(retained)])
+                if len(retained) < retain_limit:
+                    retained.extend(chunk[: retain_limit - len(retained)])
         returncode = process.wait()
     except BaseException:
         process.kill()

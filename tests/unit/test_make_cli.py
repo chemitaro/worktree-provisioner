@@ -211,6 +211,20 @@ def test_real_make_direct_detection_finds_init_after_long_prelude(tmp_path: Path
     assert (tmp_path / "init-ran").is_file()
 
 
+def test_real_make_database_detection_resolves_dynamic_eval_target(tmp_path: Path) -> None:
+    if shutil.which("make") is None:
+        pytest.skip("make is unavailable")
+    (tmp_path / "Makefile").write_text(
+        "TARGET := init\n$(eval $(TARGET):; @touch initialized)\n",
+        encoding="utf-8",
+    )
+
+    result = MakeCliGateway().run_make_init_if_available(tmp_path)
+
+    assert result.status == "succeeded"
+    assert (tmp_path / "initialized").is_file()
+
+
 @pytest.mark.parametrize("makefile", ["init:\n", "init: prerequisite\nprerequisite:\n"])
 def test_real_make_direct_detection_accepts_init_without_recipe(tmp_path: Path, makefile: str) -> None:
     if shutil.which("make") is None:
@@ -287,7 +301,7 @@ def test_real_make_direct_detection_preserves_special_makefile_path(tmp_path: Pa
     assert (target / "initialized").is_file()
 
 
-def test_real_make_diagnostic_target_spoof_is_detection_failure(tmp_path: Path) -> None:
+def test_real_make_database_ignores_diagnostic_target_spoof(tmp_path: Path) -> None:
     if shutil.which("make") is None:
         pytest.skip("make is unavailable")
     (tmp_path / "Makefile").write_text(
@@ -297,7 +311,7 @@ def test_real_make_diagnostic_target_spoof_is_detection_failure(tmp_path: Path) 
 
     result = MakeCliGateway().run_make_init_if_available(tmp_path)
 
-    assert result.status == "detection_failed"
+    assert result.status == "skipped"
     assert not (tmp_path / "all-ran").exists()
 
 
@@ -316,23 +330,43 @@ def test_real_make_error_text_spoof_is_detection_failure(tmp_path: Path) -> None
     assert result.exit_code != 0
 
 
-def test_real_make_no_init_static_proof_does_not_spawn_a_second_probe(
+def test_real_make_malformed_phony_is_detection_failure(tmp_path: Path) -> None:
+    if shutil.which("make") is None:
+        pytest.skip("make is unavailable")
+    (tmp_path / "Makefile").write_text(".PHONY: all: broken\n", encoding="utf-8")
+
+    result = MakeCliGateway().run_make_init_if_available(tmp_path)
+
+    assert result.status == "detection_failed"
+    assert result.command == ("make", "-n", "init")
+    assert result.exit_code != 0
+
+
+def test_real_make_database_probe_proves_no_init_without_source_scanning(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     (tmp_path / "Makefile").write_text("all:\n\t@echo all\n", encoding="utf-8")
     calls: list[tuple[tuple[str, ...], Path]] = []
 
-    def direct_only(argv: tuple[str, ...], cwd: Path) -> subprocess.CompletedProcess[str]:
-        calls.append((argv, cwd))
+    def direct_only(make_executable: str, cwd: Path) -> subprocess.CompletedProcess[str]:
+        calls.append(((make_executable, "-n", "init"), cwd))
         return _completed(2, stderr="No rule to make target 'init'.")
 
+    def database_probe(make_executable: str, cwd: Path) -> subprocess.CompletedProcess[str]:
+        calls.append(((make_executable, "-n", "-p", "-r", "-R", "MAKECMDGOALS=init", "."), cwd))
+        return _completed(0, stdout="# Files\nall:\n# Finished Make data base\n")
+
     monkeypatch.setattr("worktree_provisioner.infra.make_cli.shutil.which", lambda _: "/usr/bin/make")
-    monkeypatch.setattr("worktree_provisioner.infra.make_cli._run_bounded_process", direct_only)
+    monkeypatch.setattr("worktree_provisioner.infra.make_cli._run_direct_detection", direct_only)
+    monkeypatch.setattr("worktree_provisioner.infra.make_cli._run_database_probe", database_probe)
 
     result = MakeCliGateway().run_make_init_if_available(tmp_path)
 
     assert result.status == "skipped"
-    assert calls == [(("make", "-n", "init"), tmp_path)]
+    assert calls == [
+        (("make", "-n", "init"), tmp_path),
+        (("make", "-n", "-p", "-r", "-R", "MAKECMDGOALS=init", "."), tmp_path),
+    ]
 
 
 @pytest.mark.parametrize("name", ["MAKEFLAGS", "MAKEOVERRIDES", "GNUMAKEFLAGS"])
@@ -351,27 +385,30 @@ def test_real_make_static_absence_refuses_make_flag_environment(
 
 
 @pytest.mark.parametrize(
-    "makefile",
+    ("makefile", "expected_status"),
     [
-        "MAKEFLAGS += --warn-undefined-variables\nall:\n",
-        "MAKEOVERRIDES := inherited\nall:\n",
-        "ifeq ($(origin MAKEFLAGS),environment)\ninit:\nendif\n",
-        "define make-init\ninit: missing-prerequisite\nendef\n$(eval $(make-init))\n",
-        "%: missing-prerequisite\n\t@echo pattern\n",
-        "all: \\\n  other\nother:\n",
-        "this is not a valid make statement\n",
-        "./Makefile: missing-source\n\t@false\n",
+        ("MAKEFLAGS += --warn-undefined-variables\nall:\n", "skipped"),
+        ("MAKEOVERRIDES := inherited\nall:\n", "skipped"),
+        ("ifeq ($(origin MAKEFLAGS),environment)\ninit:\nendif\n", "skipped"),
+        ("define make-init\ninit: missing-prerequisite\nendef\n$(eval $(make-init))\n", "detection_failed"),
+        ("%: missing-prerequisite\n\t@echo pattern\n", "detection_failed"),
+        ("all: \\\n  other\nother:\n", "skipped"),
+        ("this is not a valid make statement\n", "detection_failed"),
+        ("./Makefile: missing-source\n\t@false\n", "detection_failed"),
     ],
 )
-def test_real_make_dynamic_or_ambiguous_absence_is_detection_failure(tmp_path: Path, makefile: str) -> None:
+def test_real_make_database_classifies_dynamic_or_ambiguous_makefiles(
+    tmp_path: Path, makefile: str, expected_status: str
+) -> None:
     if shutil.which("make") is None:
         pytest.skip("make is unavailable")
     (tmp_path / "Makefile").write_text(makefile, encoding="utf-8")
 
     result = MakeCliGateway().run_make_init_if_available(tmp_path)
 
-    assert result.status == "detection_failed"
-    assert result.exit_code != 0
+    assert result.status == expected_status
+    if expected_status == "detection_failed":
+        assert result.exit_code != 0
 
 
 def test_real_make_missing_init_prerequisite_is_not_skipped(tmp_path: Path) -> None:
@@ -403,22 +440,25 @@ def test_real_make_parse_like_rule_error_is_not_static_absence(tmp_path: Path) -
 
 
 @pytest.mark.parametrize(
-    "makefile",
+    ("makefile", "expected_status"),
     [
-        "all:\nVAR=1\n\t@echo hi\n",
-        "all:\nVAR=1: all\n\t@echo hi\n",
-        "all: VAR=1\n",
+        ("all:\nVAR=1\n\t@echo hi\n", "detection_failed"),
+        ("all:\nVAR=1: all\n\t@echo hi\n", "detection_failed"),
+        ("all: VAR=1\n", "skipped"),
     ],
 )
-def test_real_make_recipe_context_assignment_is_not_static_absence(tmp_path: Path, makefile: str) -> None:
+def test_real_make_recipe_context_assignment_is_not_static_absence(
+    tmp_path: Path, makefile: str, expected_status: str
+) -> None:
     if shutil.which("make") is None:
         pytest.skip("make is unavailable")
     (tmp_path / "Makefile").write_text(makefile, encoding="utf-8")
 
     result = MakeCliGateway().run_make_init_if_available(tmp_path)
 
-    assert result.status == "detection_failed"
-    assert result.exit_code != 0
+    assert result.status == expected_status
+    if expected_status == "detection_failed":
+        assert result.exit_code != 0
 
 
 def test_real_make_orphan_recipe_is_not_static_absence(tmp_path: Path) -> None:
