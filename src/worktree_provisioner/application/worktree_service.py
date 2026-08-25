@@ -586,9 +586,15 @@ class WorktreeService:
         open_directory = getattr(self.ports.filesystem, "open_directory", None)
         remove_bound = getattr(self.ports.git, "remove_worktree_bound", None)
         if callable(open_directory) and callable(remove_bound):
-            relative = path.absolute().relative_to(namespace.absolute())
-            if len(relative.parts) != 1:
-                raise RuntimeError("managed worktree path is not a direct namespace child")
+            lexical_path = _absolute_lexical_path(path)
+            lexical_namespace = _absolute_lexical_path(namespace)
+            try:
+                relative = lexical_path.relative_to(lexical_namespace)
+            except ValueError as exc:
+                raise RuntimeError("managed worktree path is not a strict namespace descendant") from exc
+            if not relative.parts:
+                raise RuntimeError("managed worktree path is not a strict namespace descendant")
+            relative_name = relative.as_posix()
             with open_directory(root) as root_directory, open_directory(namespace) as directory:
                 bind_root = getattr(directory, "bind_root", None)
                 if callable(bind_root):
@@ -596,7 +602,7 @@ class WorktreeService:
                 remove_bound(
                     repo_root,
                     directory=directory,
-                    name=relative.parts[0],
+                    name=relative_name,
                     force=force,
                 )
             return

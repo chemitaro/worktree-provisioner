@@ -61,3 +61,24 @@ def test_remove_by_stable_id_is_supported(
     assert result.returncode == 0, result.stderr
     assert result_payload["target"] == "stable"
     assert resolved_target["path"] == str(target)
+
+
+def test_remove_nested_managed_worktree_uses_relative_descendant_path(
+    temp_git_repo: TempGitRepository, central_root: Path, cli_runner, json_loads
+) -> None:
+    target = _add_worktree(
+        temp_git_repo,
+        central_root / temp_git_repo.path.name / "nested" / f"{temp_git_repo.path.name}-nested",
+        "nested-target",
+    )
+
+    result = cli_runner("remove", str(target), "--json", repo=temp_git_repo.path, root=central_root)
+    payload = _payload(result, json_loads)
+    result_payload = _mapping(payload["result"])
+
+    assert result.returncode == 0, result.stderr
+    assert payload["status"] == "ok"
+    assert result_payload["removed_record"] is True
+    assert result_payload["removed_directory"] is True
+    assert not target.exists()
+    assert "nested-target" in temp_git_repo.git("branch", "--list").stdout

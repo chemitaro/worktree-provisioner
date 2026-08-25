@@ -41,6 +41,30 @@ def test_create_json_contract_has_absolute_facts(
     }
 
 
+@pytest.mark.parametrize("repo_name", ["-leading-repo", "repo\\with-backslash", "repo with spaces"])
+def test_create_and_remove_preserve_special_repository_basenames(
+    git_repo_factory, central_root: Path, cli_runner, json_loads, repo_name: str
+) -> None:
+    repo = git_repo_factory(repo_name)
+    expected = central_root / repo_name / f"{repo_name}-wt1"
+
+    created = cli_runner("create", "--no-bootstrap", "--json", repo=repo.path, root=central_root)
+    created_payload = json_loads(created.stdout)
+
+    assert created.returncode == 0, created.stderr
+    assert created_payload["result"]["worktree_path"] == str(expected)
+    assert expected.is_dir()
+
+    removed = cli_runner("remove", str(expected), "--json", repo=repo.path, root=central_root)
+    removed_payload = json_loads(removed.stdout)
+
+    assert removed.returncode == 0, removed.stderr
+    assert removed_payload["status"] == "ok"
+    assert removed_payload["result"]["removed_record"] is True
+    assert removed_payload["result"]["removed_directory"] is True
+    assert not expected.exists()
+
+
 def test_create_retries_real_git_path_race_and_retains_partial_branch(
     temp_git_repo: TempGitRepository, central_root: Path, monkeypatch
 ) -> None:

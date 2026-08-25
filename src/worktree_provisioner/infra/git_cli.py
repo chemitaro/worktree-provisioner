@@ -224,7 +224,7 @@ class GitCliGateway:
         branch_name = _validated_branch(branch)
         completed = self._run(
             repo,
-            ("worktree", "add", "-b", branch_name, str(target)),
+            ("worktree", "add", "-b", branch_name, "--", str(target)),
             operation="add_worktree",
             check=False,
         )
@@ -233,7 +233,7 @@ class GitCliGateway:
         diagnostic = _diagnostic(completed.stdout, completed.stderr)
         raise GitAdapterError(
             operation="add_worktree",
-            argv=self._argv(("worktree", "add", "-b", branch_name, str(target))),
+            argv=self._argv(("worktree", "add", "-b", branch_name, "--", str(target))),
             message=f"git command failed with exit code {completed.returncode}",
             returncode=completed.returncode,
             diagnostic=diagnostic,
@@ -283,6 +283,7 @@ class GitCliGateway:
             "add",
             "-b",
             branch_name,
+            "--",
             target_name,
             start_point,
         )
@@ -368,7 +369,9 @@ class GitCliGateway:
 
         repo = _validated_path(repo_root, name="repository root")
         target = _validated_path(path, name="worktree path", require_exists=False)
-        args = ("worktree", "remove", "--force", str(target)) if force else ("worktree", "remove", str(target))
+        args = (
+            ("worktree", "remove", "--force", "--", str(target)) if force else ("worktree", "remove", "--", str(target))
+        )
         self._run(repo, args, operation="remove_worktree")
 
     def remove_worktree_bound(self, repo_root: Path, *, directory: object, name: str, force: bool) -> None:
@@ -403,6 +406,7 @@ class GitCliGateway:
             "worktree",
             "remove",
             *(("--force",) if force else ()),
+            "--",
             target_name,
         )
         self._run(repo, args, operation="remove_worktree_bound", cwd_fd=fd)
@@ -689,11 +693,18 @@ def _validated_relative_name(name: str) -> str:
             argv=(),
             message="worktree name must be a non-empty string without NUL bytes",
         )
-    if name in {".", ".."} or "/" in name or "\\" in name:
+    relative = Path(name)
+    if relative.is_absolute():
         raise GitAdapterError(
             operation="validate_path",
             argv=(),
-            message="bound worktree name must be one path component",
+            message="bound worktree name must be a relative path",
+        )
+    if any(component in {".", ".."} for component in name.split("/")):
+        raise GitAdapterError(
+            operation="validate_path",
+            argv=(),
+            message="bound worktree name must not contain '.' or '..' path components",
         )
     return name
 

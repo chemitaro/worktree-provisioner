@@ -13,6 +13,7 @@ from worktree_provisioner.infra.git_cli import (
     GitAdapterError,
     GitCliGateway,
     _git_environment,
+    _validated_relative_name,
     parse_worktree_porcelain,
 )
 
@@ -228,15 +229,26 @@ def test_git_gateway_uses_exact_argv_and_preserves_paths(tmp_path: Path, monkeyp
         ["git", "show-ref", "--verify", "--quiet", "refs/heads/main"],
         ["git", "check-ref-format", "--branch", "main"],
         ["git", "worktree", "list", "--porcelain", "-z"],
-        ["git", "worktree", "add", "-b", "feature", str(add_path)],
-        ["git", "worktree", "remove", str(remove_path)],
-        ["git", "worktree", "remove", "--force", str(remove_path)],
+        ["git", "worktree", "add", "-b", "feature", "--", str(add_path)],
+        ["git", "worktree", "remove", "--", str(remove_path)],
+        ["git", "worktree", "remove", "--force", "--", str(remove_path)],
     ]
     assert all(kwargs["shell"] is False for _, kwargs in calls)
     assert all(kwargs["cwd"] == repo for _, kwargs in calls)
     text_calls = [kwargs for argv, kwargs in calls if kwargs["text"] is True]
     assert all(kwargs["encoding"] == "utf-8" for kwargs in text_calls)
     assert all(kwargs["errors"] == "surrogateescape" for kwargs in text_calls)
+
+
+@pytest.mark.parametrize("name", ["nested/worktree", "-leading-worktree", "worktree with spaces", "repo\\worktree"])
+def test_bound_worktree_name_preserves_relative_posix_path_and_backslash(name: str) -> None:
+    assert _validated_relative_name(name) == name
+
+
+@pytest.mark.parametrize("name", ["", ".", "..", "/absolute", "nested/./worktree", "nested/../worktree", "nul\x00name"])
+def test_bound_worktree_name_rejects_absolute_empty_nul_and_traversal(name: str) -> None:
+    with pytest.raises(GitAdapterError):
+        _validated_relative_name(name)
 
 
 def test_git_gateway_encodes_unicode_argv_when_filesystem_locale_is_ascii(
