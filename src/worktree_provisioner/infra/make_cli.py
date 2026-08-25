@@ -116,6 +116,15 @@ class MakeCliGateway:
                 detail=f"{self.make_executable} executable was not found",
             )
 
+        if any(name in os.environ for name in _MAKE_AUTHORITY_VARIABLES):
+            return BootstrapResult(
+                requested=True,
+                status="detection_failed",
+                command=detection_argv,
+                exit_code=None,
+                detail="make environment altered target detection",
+            )
+
         try:
             detected, runner_has_init_target = self._run_detection(detection_argv, target)
         except OSError as exc:
@@ -156,25 +165,12 @@ class MakeCliGateway:
 
             database_facts = _database_facts(database.stdout, "init")
             if database_facts is None:
-                if detected.returncode != 0:
-                    return BootstrapResult(
-                        requested=True,
-                        status="detection_failed",
-                        command=detection_argv,
-                        exit_code=detected.returncode,
-                        detail=detection_detail or "make init database detection was inconclusive",
-                    )
-                # Direct Make evaluation is authoritative when it succeeds;
-                # a structural probe with different built-in rules may fail
-                # without invalidating a runnable direct target.
-                database_facts = (False, False)
-            if any(name in os.environ for name in _MAKE_AUTHORITY_VARIABLES):
                 return BootstrapResult(
                     requested=True,
                     status="detection_failed",
                     command=detection_argv,
                     exit_code=detected.returncode,
-                    detail="make environment altered target detection",
+                    detail=detection_detail or "make init database detection was inconclusive",
                 )
             has_init_target, has_fallback_rule = database_facts
             if detected.returncode != 0:
@@ -208,9 +204,7 @@ class MakeCliGateway:
                         exit_code=detected.returncode,
                         detail=detection_detail or "make init detection failed",
                     )
-                # Direct Make evaluation succeeded.  A separate database
-                # probe may have different MAKEFLAGS/goal semantics, so its
-                # absence result must not suppress the real ``make init``.
+                return _skipped()
         execution_argv = (self.make_executable, "init")
         try:
             executed = self._run(execution_argv, target)

@@ -211,6 +211,20 @@ def test_real_make_direct_detection_finds_init_after_long_prelude(tmp_path: Path
     assert (tmp_path / "init-ran").is_file()
 
 
+@pytest.mark.parametrize("source", ["init.c", "init.o"])
+def test_real_make_built_in_implicit_rule_is_not_bootstrap_authority(tmp_path: Path, source: str) -> None:
+    if shutil.which("make") is None:
+        pytest.skip("make is unavailable")
+    (tmp_path / "Makefile").write_text("all:\n", encoding="utf-8")
+    (tmp_path / source).write_text("int main(void) { return 0; }\n", encoding="utf-8")
+
+    result = MakeCliGateway().run_make_init_if_available(tmp_path)
+
+    assert result.status == "skipped"
+    assert result.command is None
+    assert not (tmp_path / "init").exists()
+
+
 def test_real_make_database_detection_resolves_dynamic_eval_target(tmp_path: Path) -> None:
     if shutil.which("make") is None:
         pytest.skip("make is unavailable")
@@ -394,8 +408,8 @@ def test_real_make_unrelated_implicit_pattern_does_not_hide_missing_init(tmp_pat
     assert result.command is None
 
 
-@pytest.mark.parametrize("name", ["MAKEFLAGS", "MAKEOVERRIDES", "GNUMAKEFLAGS"])
-def test_real_make_static_absence_refuses_make_flag_environment(
+@pytest.mark.parametrize("name", ["MAKEFILES", "MAKEFLAGS", "MAKEOVERRIDES", "GNUMAKEFLAGS"])
+def test_real_make_static_absence_refuses_authority_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
 ) -> None:
     if shutil.which("make") is None:
@@ -406,7 +420,35 @@ def test_real_make_static_absence_refuses_make_flag_environment(
     result = MakeCliGateway().run_make_init_if_available(tmp_path)
 
     assert result.status == "detection_failed"
-    assert result.exit_code != 0
+    assert result.exit_code is None
+
+
+def test_real_make_makefiles_parse_time_sentinel_is_not_evaluated_before_precheck(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if shutil.which("make") is None:
+        pytest.skip("make is unavailable")
+    (tmp_path / "Makefile").write_text("all:\n", encoding="utf-8")
+    sentinel = tmp_path / "ambient-sentinel"
+    injected = tmp_path / "injected.mk"
+    injected.write_text(f"$(file >{sentinel},ambient)\n", encoding="utf-8")
+    monkeypatch.setenv("MAKEFILES", str(injected))
+    calls: list[tuple[str, ...]] = []
+
+    def unexpected_make(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        calls.append(tuple(args[0]))
+        raise AssertionError("make must not start when authority environment is present")
+
+    monkeypatch.setattr("worktree_provisioner.infra.make_cli._run_bounded_process", unexpected_make)
+
+    result = MakeCliGateway().run_make_init_if_available(tmp_path)
+
+    assert result.status == "detection_failed"
+    assert result.command == ("make", "-n", "init")
+    assert result.exit_code is None
+    assert calls == []
+    assert not sentinel.exists()
 
 
 @pytest.mark.parametrize(
@@ -522,7 +564,7 @@ def test_real_make_makefiles_injection_is_not_static_absence(tmp_path: Path, mon
     result = MakeCliGateway().run_make_init_if_available(tmp_path)
 
     assert result.status == "detection_failed"
-    assert result.exit_code != 0
+    assert result.exit_code is None
 
 
 def test_real_make_init_rule_selected_by_makecmdgoals_is_not_skipped(tmp_path: Path) -> None:
