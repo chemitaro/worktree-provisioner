@@ -375,7 +375,7 @@ class GitCliGateway:
         self._run(repo, args, operation="remove_worktree")
 
     def remove_worktree_bound(self, repo_root: Path, *, directory: object, name: str, force: bool) -> None:
-        """Remove a worktree using a root-bound namespace directory fd."""
+        """Remove a worktree using a root-bound parent directory fd."""
 
         repo = _validated_path(repo_root, name="repository root")
         fd = getattr(directory, "fd", None)
@@ -386,19 +386,32 @@ class GitCliGateway:
                 message="worktree namespace capability is invalid",
             )
         within_root = getattr(directory, "is_within_bound_root", None)
+        identity_matches = getattr(directory, "path_identity_matches", None)
         if callable(within_root) and not within_root():
             raise GitAdapterError(
                 operation="remove_worktree_bound",
                 argv=(),
                 message="worktree namespace is outside the managed root",
             )
-        target_name = _validated_relative_name(name)
+        if callable(identity_matches) and not identity_matches():
+            raise GitAdapterError(
+                operation="remove_worktree_bound",
+                argv=(),
+                message="worktree parent changed during remove",
+            )
+        target_name = _validated_basename(name)
         common_git_dir = self._common_git_dir(repo)
         if callable(within_root) and not within_root():
             raise GitAdapterError(
                 operation="remove_worktree_bound",
                 argv=(),
                 message="worktree namespace is outside the managed root",
+            )
+        if callable(identity_matches) and not identity_matches():
+            raise GitAdapterError(
+                operation="remove_worktree_bound",
+                argv=(),
+                message="worktree parent changed during remove",
             )
         args = (
             "--git-dir",
@@ -705,6 +718,22 @@ def _validated_relative_name(name: str) -> str:
             operation="validate_path",
             argv=(),
             message="bound worktree name must not contain '.' or '..' path components",
+        )
+    return name
+
+
+def _validated_basename(name: str) -> str:
+    if not isinstance(name, str) or not name or "\x00" in name:
+        raise GitAdapterError(
+            operation="validate_path",
+            argv=(),
+            message="worktree basename must be a non-empty string without NUL bytes",
+        )
+    if name in {".", ".."} or "/" in name:
+        raise GitAdapterError(
+            operation="validate_path",
+            argv=(),
+            message="bound worktree basename must be one path component",
         )
     return name
 

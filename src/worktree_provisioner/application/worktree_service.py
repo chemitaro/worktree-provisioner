@@ -594,15 +594,16 @@ class WorktreeService:
                 raise RuntimeError("managed worktree path is not a strict namespace descendant") from exc
             if not relative.parts:
                 raise RuntimeError("managed worktree path is not a strict namespace descendant")
-            relative_name = relative.as_posix()
-            with open_directory(root) as root_directory, open_directory(namespace) as directory:
+            parent_path = lexical_path.parent
+            target_name = lexical_path.name
+            with open_directory(root) as root_directory, open_directory(parent_path) as directory:
                 bind_root = getattr(directory, "bind_root", None)
                 if callable(bind_root):
                     bind_root(root_directory)
                 remove_bound(
                     repo_root,
                     directory=directory,
-                    name=relative_name,
+                    name=target_name,
                     force=force,
                 )
             return

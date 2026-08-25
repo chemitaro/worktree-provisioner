@@ -3,7 +3,16 @@ from __future__ import annotations
 from pathlib import Path
 from typing import cast
 
+import pytest
 from conftest import CliResult, TempGitRepository  # type: ignore[import-not-found]
+
+from worktree_provisioner.application.contracts import ExpectedError, RemoveRequest
+from worktree_provisioner.application.ports import ApplicationPorts
+from worktree_provisioner.application.worktree_service import WorktreeService
+from worktree_provisioner.infra.environment import EnvironmentAdapter
+from worktree_provisioner.infra.filesystem import DirectoryHandle, FilesystemCliGateway
+from worktree_provisioner.infra.git_cli import GitCliGateway
+from worktree_provisioner.infra.make_cli import MakeCliGateway
 
 
 def _payload(result: CliResult, json_loads: object) -> dict[str, object]:
@@ -82,3 +91,49 @@ def test_remove_nested_managed_worktree_uses_relative_descendant_path(
     assert result_payload["removed_directory"] is True
     assert not target.exists()
     assert "nested-target" in temp_git_repo.git("branch", "--list").stdout
+
+
+def test_remove_nested_parent_swap_after_bound_check_fails_closed(
+    temp_git_repo: TempGitRepository, central_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = _add_worktree(
+        temp_git_repo,
+        central_root / temp_git_repo.path.name / "nested" / f"{temp_git_repo.path.name}-nested-race",
+        "nested-race",
+    )
+    namespace = central_root / temp_git_repo.path.name
+    nested = namespace / "nested"
+    moved_nested = central_root.parent / f"{temp_git_repo.path.name}-nested-moved"
+    external = central_root.parent / "external-nested-target"
+    external.mkdir()
+    original_check = DirectoryHandle.is_within_bound_root
+    swapped = False
+
+    def swap_after_parent_check(handle: DirectoryHandle) -> bool:
+        nonlocal swapped
+        result = original_check(handle)
+        if handle.path == nested and not swapped:
+            swapped = True
+            nested.rename(moved_nested)
+            nested.symlink_to(external, target_is_directory=True)
+        return result
+
+    monkeypatch.setattr(DirectoryHandle, "is_within_bound_root", swap_after_parent_check)
+    service = WorktreeService(
+        ApplicationPorts(
+            git=GitCliGateway(),
+            bootstrap=MakeCliGateway(),
+            filesystem=FilesystemCliGateway(),
+            environment=EnvironmentAdapter(),
+        )
+    )
+
+    with pytest.raises(ExpectedError) as caught:
+        service.remove(RemoveRequest(repo_root=temp_git_repo.path, root=central_root, target=str(target), force=True))
+
+    assert caught.value.code == "git_worktree_remove_failed"
+    assert swapped
+    assert (moved_nested / target.name).is_dir()
+    assert nested.is_symlink()
+    assert not (external / target.name).exists()
+    assert str(target) in temp_git_repo.git("worktree", "list", "--porcelain").stdout
