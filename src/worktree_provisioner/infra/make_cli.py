@@ -154,24 +154,20 @@ class MakeCliGateway:
                     detail=_safe_bounded(str(exc)),
                 )
 
-            database_detail = _diagnostic(None, database.stderr)
-            if database.returncode != 0:
-                return BootstrapResult(
-                    requested=True,
-                    status="detection_failed",
-                    command=detection_argv,
-                    exit_code=detected.returncode,
-                    detail=database_detail or detection_detail or "make init database detection failed",
-                )
             database_facts = _database_facts(database.stdout, "init")
             if database_facts is None:
-                return BootstrapResult(
-                    requested=True,
-                    status="detection_failed",
-                    command=detection_argv,
-                    exit_code=detected.returncode,
-                    detail=detection_detail or "make init database detection was inconclusive",
-                )
+                if detected.returncode != 0:
+                    return BootstrapResult(
+                        requested=True,
+                        status="detection_failed",
+                        command=detection_argv,
+                        exit_code=detected.returncode,
+                        detail=detection_detail or "make init database detection was inconclusive",
+                    )
+                # Direct Make evaluation is authoritative when it succeeds;
+                # a structural probe with different built-in rules may fail
+                # without invalidating a runnable direct target.
+                database_facts = (False, False)
             if any(name in os.environ for name in _MAKE_AUTHORITY_VARIABLES):
                 return BootstrapResult(
                     requested=True,
@@ -181,39 +177,40 @@ class MakeCliGateway:
                     detail="make environment altered target detection",
                 )
             has_init_target, has_fallback_rule = database_facts
+            if detected.returncode != 0:
+                if (
+                    not has_init_target
+                    and not has_fallback_rule
+                    and _is_plain_missing_target_failure(detected.stderr)
+                    and _is_plain_missing_target_failure(database.stderr)
+                ):
+                    return _skipped()
+                database_detail = _diagnostic(None, database.stderr)
+                return BootstrapResult(
+                    requested=True,
+                    status="detection_failed",
+                    command=detection_argv,
+                    exit_code=detected.returncode,
+                    detail=database_detail or detection_detail or "make init detection failed",
+                )
             if not has_init_target:
                 # A missing goal is a valid absence proof only when Make's
                 # database parsed successfully.  A pre-existing path is also
                 # a valid no-rule case: Make reports it as up to date even
                 # though it has no database rule entry.
-                if detected.returncode != 0:
-                    if has_fallback_rule:
-                        return BootstrapResult(
-                            requested=True,
-                            status="detection_failed",
-                            command=detection_argv,
-                            exit_code=detected.returncode,
-                            detail=detection_detail or "make init detection failed",
-                        )
-                    return _skipped()
                 if (target / "init").exists():
                     return _skipped()
-                return BootstrapResult(
-                    requested=True,
-                    status="detection_failed",
-                    command=detection_argv,
-                    exit_code=detected.returncode,
-                    detail=detection_detail or "make init target detection was inconclusive",
-                )
-            if detected.returncode != 0:
-                return BootstrapResult(
-                    requested=True,
-                    status="detection_failed",
-                    command=detection_argv,
-                    exit_code=detected.returncode,
-                    detail=detection_detail or "make init detection failed",
-                )
-
+                if has_fallback_rule:
+                    return BootstrapResult(
+                        requested=True,
+                        status="detection_failed",
+                        command=detection_argv,
+                        exit_code=detected.returncode,
+                        detail=detection_detail or "make init detection failed",
+                    )
+                # Direct Make evaluation succeeded.  A separate database
+                # probe may have different MAKEFLAGS/goal semantics, so its
+                # absence result must not suppress the real ``make init``.
         execution_argv = (self.make_executable, "init")
         try:
             executed = self._run(execution_argv, target)
@@ -408,16 +405,16 @@ def _run_direct_detection(make_executable: str, cwd: Path) -> subprocess.Complet
 
 
 def _run_database_probe(make_executable: str, cwd: Path) -> subprocess.CompletedProcess[str]:
-    """Print Make's parsed database without selecting a repository target.
+    """Print Make's parsed database while preserving the direct goal context.
 
-    ``.`` is an existing goal, so this probe does not invoke the repository's
-    default target.  Overriding ``MAKECMDGOALS`` keeps conditionals written for
-    ``make init`` in the same branch as the direct probe.  ``-p`` is GNU Make's
-    own structural view; the adapter only reads the resulting database.
+    The probe keeps ``init`` as its goal so Makefile conditionals observe the
+    same ``MAKECMDGOALS`` and variable origins as direct detection.  ``-r`` /
+    ``-R`` only remove built-in rules and variables, allowing user-defined
+    fallback rules to be distinguished from the default Make database.
     """
 
     return _run_bounded_process(
-        (make_executable, "-n", "-p", "-r", "-R", "MAKECMDGOALS=init", "."),
+        (make_executable, "-n", "-p", "-r", "-R", "init"),
         cwd,
         retain_limit=_DATABASE_OUTPUT_LIMIT,
     )
@@ -453,17 +450,30 @@ def _database_facts(output: str, target: str) -> tuple[bool, bool] | None:
         if implicit_start is not None:
             for line in lines[implicit_start + 1 : start]:
                 if line and not line.startswith("#") and not line.startswith("\t") and ":" in line:
-                    has_fallback_rule = True
+                    header, _, _ = line.partition(":")
+                    if any(_pattern_matches_target(pattern, target) for pattern in header.split()):
+                        has_fallback_rule = True
 
         current_header: str | None = None
         current_has_commands = False
+        not_a_target = False
         for line in lines[start + 1 : end]:
+            if line == "# Not a target:":
+                if current_header == ".DEFAULT" and current_has_commands:
+                    has_fallback_rule = True
+                not_a_target = True
+                current_header = None
+                current_has_commands = False
+                continue
             if not line or line.startswith("#") or line.startswith("\t"):
                 if line.startswith(("#  commands to execute", "#  recipe to execute")) and current_header == ".DEFAULT":
                     current_has_commands = True
                 continue
             header, separator, _ = line.partition(":")
             if not separator:
+                continue
+            if not_a_target:
+                not_a_target = False
                 continue
             if current_header == ".DEFAULT" and current_has_commands:
                 has_fallback_rule = True
@@ -477,6 +487,42 @@ def _database_facts(output: str, target: str) -> tuple[bool, bool] | None:
             has_fallback_rule = True
         return has_target, has_fallback_rule
     return None
+
+
+def _pattern_matches_target(pattern: str, target: str) -> bool:
+    """Return whether a GNU Make pattern can select ``target``.
+
+    The database probe only needs the target-selection portion of implicit
+    rule matching.  A ``%`` stem is sufficient here; prerequisite feasibility
+    remains authoritative in the direct Make result.
+    """
+
+    if "%" not in pattern:
+        return False
+    prefix, suffix = pattern.split("%", 1)
+    if not target.startswith(prefix):
+        return False
+    return target[len(prefix) :].endswith(suffix)
+
+
+def _is_plain_missing_target_failure(stderr: str) -> bool:
+    """Recognize Make's ordinary missing-target diagnostic.
+
+    Parse and expansion failures include a Makefile location (for example,
+    ``Makefile:1: ***``).  A missing prerequisite also names ``needed by``.
+    Such diagnostics must remain detection failures; only the location-free
+    fatal diagnostic for the requested goal can prove target absence here.
+    """
+
+    lines = [line.strip() for line in stderr.splitlines() if line.strip()]
+    if any(re.search(r"^[^:\n]+:\d+(?::\d+)?:\s", line) for line in lines):
+        return False
+    return any(
+        re.search(r"^[^:\n]+:\s+\*\*\*\s+No rule to make target", line)
+        and "needed by" not in line
+        and re.search(r"(?:[`']init[`']|\binit\b)", line)
+        for line in lines
+    )
 
 
 def _database_has_target(output: str, target: str) -> bool | None:

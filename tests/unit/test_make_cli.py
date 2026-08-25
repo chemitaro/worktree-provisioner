@@ -353,7 +353,7 @@ def test_real_make_database_probe_proves_no_init_without_source_scanning(
         return _completed(2, stderr="No rule to make target 'init'.")
 
     def database_probe(make_executable: str, cwd: Path) -> subprocess.CompletedProcess[str]:
-        calls.append(((make_executable, "-n", "-p", "-r", "-R", "MAKECMDGOALS=init", "."), cwd))
+        calls.append(((make_executable, "-n", "-p", "-r", "-R", "init"), cwd))
         return _completed(0, stdout="# Files\nall:\n# Finished Make data base\n")
 
     monkeypatch.setattr("worktree_provisioner.infra.make_cli.shutil.which", lambda _: "/usr/bin/make")
@@ -362,11 +362,36 @@ def test_real_make_database_probe_proves_no_init_without_source_scanning(
 
     result = MakeCliGateway().run_make_init_if_available(tmp_path)
 
-    assert result.status == "skipped"
+    assert result.status == "detection_failed"
     assert calls == [
         (("make", "-n", "init"), tmp_path),
-        (("make", "-n", "-p", "-r", "-R", "MAKECMDGOALS=init", "."), tmp_path),
+        (("make", "-n", "-p", "-r", "-R", "init"), tmp_path),
     ]
+
+
+def test_real_make_direct_failure_with_make_origin_change_is_not_skipped(tmp_path: Path) -> None:
+    if shutil.which("make") is None:
+        pytest.skip("make is unavailable")
+    (tmp_path / "Makefile").write_text(
+        "ifeq ($(origin MAKEOVERRIDES),undefined)\n$(error direct detection failed)\nendif\nall:\n",
+        encoding="utf-8",
+    )
+
+    result = MakeCliGateway().run_make_init_if_available(tmp_path)
+
+    assert result.status == "detection_failed"
+    assert result.exit_code != 0
+
+
+def test_real_make_unrelated_implicit_pattern_does_not_hide_missing_init(tmp_path: Path) -> None:
+    if shutil.which("make") is None:
+        pytest.skip("make is unavailable")
+    (tmp_path / "Makefile").write_text("%.o: %.c\n\t@echo object\n", encoding="utf-8")
+
+    result = MakeCliGateway().run_make_init_if_available(tmp_path)
+
+    assert result.status == "skipped"
+    assert result.command is None
 
 
 @pytest.mark.parametrize("name", ["MAKEFLAGS", "MAKEOVERRIDES", "GNUMAKEFLAGS"])
