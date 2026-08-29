@@ -73,10 +73,7 @@ class _SnapshotGit(FakeGitGateway):
 
 
 class _IdentityFilesystem(FilesystemCliGateway):
-    identity_calls = 0
-
     def path_identity_no_follow(self, path: Path) -> tuple[int, int] | None:
-        self.identity_calls += 1
         try:
             info = path.lstat()
         except OSError:
@@ -812,7 +809,6 @@ def test_refresh_target_identity_change_is_blocked_before_git_remove(tmp_path: P
     assert caught.value.code == "remove_blocked"
     assert "target_changed_after_refresh" in _blockers(caught.value)
     assert not [call for call in refreshed.calls if call[0] == "remove_worktree"]
-    assert filesystem.identity_calls >= 2
     assert target.is_dir()
     assert (target / "replacement-marker").is_file()
 

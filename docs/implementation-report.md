@@ -146,7 +146,7 @@ Round 6反映後の最終候補では、locked sync、Ruff format、Ruff lint、
 build、fresh-wheel smoke、wrapper shell syntax、`git diff --check`を再実行した。生成物のSHA-256は次のとおり。
 
 - wheel: `854a976b7be03284b738eb3d8abac945b45ddb3a2762c0eb7b84a4703d0eb0f6`
-- sdist: `f33857a85fa03ff85be144a283322076603ed73a9130afd795ee5a3896edaea2`
+- sdist: `38454dfa155b860824d3589e4eb88f21be3fc3ec9ece97134f6b41bdec94b0dd`
 
 ## 8. 最終完了条件
 
