@@ -20,6 +20,7 @@ BootstrapStatus: TypeAlias = Literal[
     "detection_failed",
 ]
 ResponseStatus: TypeAlias = Literal["ok", "partial", "error"]
+ErrorStatus: TypeAlias = Literal["partial", "error"]
 ClassificationReason: TypeAlias = Literal["root_valid", "namespace_symlink"]
 WorktreeOrigin: TypeAlias = Literal[
     "managed_namespace",
@@ -61,6 +62,7 @@ BlockerCode: TypeAlias = Literal[
     "bare_worktree",
     "locked_worktree",
     "path_missing",
+    "path_observation_unavailable",
     "record_missing_after_refresh",
     "target_changed_after_refresh",
     "outside_managed_namespace",
@@ -155,7 +157,7 @@ class WorktreeRecordView:
     lock_reason: str | None
     main: bool
     current: bool
-    path_exists: bool
+    path_exists: bool | None
     record_exists: bool
     managed: bool
     classification_available: bool
@@ -237,7 +239,7 @@ class ExpectedError(RuntimeError):
     message: str
     details: Mapping[str, object]
     result: object | None
-    status: Literal["partial", "error"]
+    status: ErrorStatus
     warnings: tuple[ResultWarning, ...]
 
     def __init__(
@@ -248,7 +250,7 @@ class ExpectedError(RuntimeError):
         message: str,
         details: Mapping[str, object],
         result: object | None,
-        status: Literal["partial", "error"],
+        status: ErrorStatus,
         warnings: tuple[ResultWarning, ...] = (),
     ) -> None:
         super().__init__(message)
@@ -259,8 +261,3 @@ class ExpectedError(RuntimeError):
         self.result = result
         self.status = status
         self.warnings = tuple(warnings)
-
-
-# The design document uses this longer name in its error-boundary example.
-# Keep it as an exact alias rather than introducing a second exception type.
-WorktreeProvisionerError = ExpectedError

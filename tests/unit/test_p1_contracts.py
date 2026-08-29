@@ -21,6 +21,17 @@ def test_top_level_help_exposes_four_commands(cli_runner) -> None:
     assert "delete" not in result.stdout
 
 
+def test_create_help_states_trust_boundary_and_no_bootstrap_scope(cli_runner) -> None:
+    result = cli_runner("create", "--help")
+
+    assert result.returncode == 0, result.stderr
+    assert "trusted repository" in result.stdout
+    assert "hooks" in result.stdout
+    assert "filters" in result.stdout
+    assert "Make detection" in result.stdout
+    assert "--no-bootstrap" in result.stdout
+
+
 def test_legacy_environment_alone_is_root_required(
     temp_git_repo: TempGitRepository, tmp_path: Path, cli_runner, json_loads
 ) -> None:
@@ -122,7 +133,7 @@ def test_json_success_has_common_envelope_and_clean_stderr(
 
     assert result.returncode == 0, result.stderr
     assert set(payload) == {"schema_version", "status", "operation", "result", "error", "warnings"}
-    assert payload["schema_version"] == 1
+    assert payload["schema_version"] == 2
     assert payload["status"] == "ok"
     assert payload["operation"] == "create"
     assert payload["error"] is None

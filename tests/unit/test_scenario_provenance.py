@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 MANIFEST = Path(__file__).parents[1] / "scenario_provenance.json"
@@ -36,6 +37,23 @@ def test_p1_manifest_records_non_compatibility_boundaries() -> None:
     assert "bootstrap failure exit 0" in forbidden
     assert "external remove success" in forbidden
     assert "double force or implicit unlock" in forbidden
+
+
+def test_p1_manifest_test_references_exist_and_are_traceable() -> None:
+    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+
+    for scenario in manifest["scenarios"]:
+        test_reference = scenario["test"]
+        test_path_text, separator, symbol = test_reference.partition("::")
+        assert separator, test_reference
+        test_path = REPOSITORY_ROOT / test_path_text
+        assert test_path.is_file(), test_reference
+        source = test_path.read_text(encoding="utf-8")
+        assert re.search(rf"^\s*(?:async\s+)?def\s+{re.escape(symbol)}\(", source, re.MULTILINE), test_reference
+
+    mappings = manifest["acceptance_criteria_mapping"]
+    assert mappings["WTP-AC-015"] == ["P1-S17"]
+    assert mappings["WTP-AC-018"] == ["P1-S18"]
 
 
 def test_namespace_ancestor_race_boundary_is_documented() -> None:

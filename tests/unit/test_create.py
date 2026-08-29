@@ -24,7 +24,7 @@ from worktree_provisioner.application.worktree_service import WorktreeService
 from worktree_provisioner.infra.environment import EnvironmentAdapter
 from worktree_provisioner.infra.filesystem import FilesystemCliGateway
 from worktree_provisioner.infra.git_cli import GitAdapterError
-from worktree_provisioner.presentation.json_v1 import error_document
+from worktree_provisioner.presentation.json_v2 import error_document
 from worktree_provisioner.presentation.text import render_error
 
 

@@ -7,6 +7,7 @@ configured production worktree root.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import stat
@@ -20,6 +21,7 @@ from typing import Any, cast
 import pytest
 
 from worktree_provisioner.application.contracts import BootstrapResult, BootstrapStatus
+from worktree_provisioner.application.ports import DirectoryCapability, PathIdentity
 
 
 @dataclass(frozen=True)
@@ -123,11 +125,17 @@ class FakeGitGateway:
         self.branches.add(branch)
         self.records.append(FakeGitRecord(path=path, branch=branch))
 
+    def add_worktree_bound(self, repo_root: Path, *, directory: DirectoryCapability, name: str, branch: str) -> None:
+        self.add_worktree(repo_root, path=directory.path / name, branch=branch)
+
     def remove_worktree(self, repo_root: Path, *, path: Path, force: bool) -> None:
         self._record("remove_worktree", repo_root, path=path, force=force)
         if self.remove_error is not None:
             raise self.remove_error
         self.records = [record for record in self.records if record.path != path]
+
+    def remove_worktree_bound(self, repo_root: Path, *, directory: DirectoryCapability, name: str, force: bool) -> None:
+        self.remove_worktree(repo_root, path=directory.path / name, force=force)
 
 
 @dataclass(frozen=True)
@@ -164,6 +172,28 @@ class FakeBootstrapGateway:
 
 
 @dataclass
+class _FakeDirectoryCapability:
+    path: Path
+    fd: int = 0
+    root: DirectoryCapability | None = None
+
+    def __enter__(self) -> DirectoryCapability:
+        return self
+
+    def __exit__(self, _type: object, _value: object, _traceback: object) -> None:
+        return None
+
+    def bind_root(self, root: DirectoryCapability) -> None:
+        self.root = root
+
+    def is_within_bound_root(self) -> bool:
+        return True
+
+    def path_identity_matches(self) -> bool:
+        return True
+
+
+@dataclass
 class FakeFilesystemGateway:
     """No-follow filesystem gateway foundation for cleanup tests."""
 
@@ -180,6 +210,13 @@ class FakeFilesystemGateway:
         self.calls.append(("path_exists_no_follow", path))
         return path in self.existing
 
+    def path_identity_no_follow(self, path: Path) -> PathIdentity | None:
+        self.calls.append(("path_identity_no_follow", path))
+        if path not in self.existing:
+            return None
+        digest = hashlib.sha256(str(path).encode("utf-8")).digest()
+        return (int.from_bytes(digest[:8], "big"), int.from_bytes(digest[8:16], "big"))
+
     def ensure_directory(self, path: Path) -> None:
         self.calls.append(("ensure_directory", path))
         self.existing.add(path)
@@ -189,6 +226,14 @@ class FakeFilesystemGateway:
         if self.remove_error is not None:
             raise self.remove_error
         self.existing.discard(path)
+
+    def open_directory(self, path: Path) -> DirectoryCapability:
+        self.calls.append(("open_directory", path))
+        return _FakeDirectoryCapability(path=path)
+
+    def remove_target_no_follow_bound(self, directory: DirectoryCapability, target: Path) -> None:
+        self.calls.append(("remove_target_no_follow_bound", target))
+        self.remove_target_no_follow(target)
 
 
 def _run_git(path: Path, *args: str) -> subprocess.CompletedProcess[str]:

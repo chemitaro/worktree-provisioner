@@ -4,12 +4,31 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, TypeAlias
 
 from worktree_provisioner.application.contracts import (
     BootstrapResult,
     GitWorktreeRecord,
 )
+
+PathIdentity: TypeAlias = tuple[int, int]
+
+
+class DirectoryCapability(Protocol):
+    """Descriptor-bound directory capability used for mutation operations."""
+
+    fd: int
+    path: Path
+
+    def __enter__(self) -> DirectoryCapability: ...
+
+    def __exit__(self, _type: object, _value: object, _traceback: object) -> None: ...
+
+    def bind_root(self, root: DirectoryCapability) -> None: ...
+
+    def is_within_bound_root(self) -> bool: ...
+
+    def path_identity_matches(self) -> bool: ...
 
 
 class GitGateway(Protocol):
@@ -25,7 +44,15 @@ class GitGateway(Protocol):
 
     def add_worktree(self, repo_root: Path, *, path: Path, branch: str) -> None: ...
 
+    def add_worktree_bound(
+        self, repo_root: Path, *, directory: DirectoryCapability, name: str, branch: str
+    ) -> None: ...
+
     def remove_worktree(self, repo_root: Path, *, path: Path, force: bool) -> None: ...
+
+    def remove_worktree_bound(
+        self, repo_root: Path, *, directory: DirectoryCapability, name: str, force: bool
+    ) -> None: ...
 
 
 class BootstrapGateway(Protocol):
@@ -37,9 +64,15 @@ class FilesystemGateway(Protocol):
 
     def path_exists_no_follow(self, path: Path) -> bool: ...
 
+    def path_identity_no_follow(self, path: Path) -> PathIdentity | None: ...
+
     def ensure_directory(self, path: Path) -> None: ...
 
     def remove_target_no_follow(self, path: Path) -> None: ...
+
+    def open_directory(self, path: Path) -> DirectoryCapability: ...
+
+    def remove_target_no_follow_bound(self, directory: DirectoryCapability, target: Path) -> None: ...
 
 
 class EnvironmentGateway(Protocol):
@@ -54,7 +87,3 @@ class ApplicationPorts:
     bootstrap: BootstrapGateway
     filesystem: FilesystemGateway
     environment: EnvironmentGateway
-
-
-# Short alias for callers that use the generic term from the composition root.
-Ports = ApplicationPorts

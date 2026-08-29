@@ -13,11 +13,11 @@ from worktree_provisioner.application.contracts import (
     RemoveRequest,
     RemoveResult,
 )
-from worktree_provisioner.application.ports import ApplicationPorts
+from worktree_provisioner.application.ports import ApplicationPorts, DirectoryCapability
 from worktree_provisioner.application.worktree_service import WorktreeService
 from worktree_provisioner.infra.environment import EnvironmentAdapter
 from worktree_provisioner.infra.filesystem import DirectoryHandle, FilesystemCliGateway
-from worktree_provisioner.presentation.json_v1 import error_document
+from worktree_provisioner.presentation.json_v2 import error_document
 
 
 def _service(git: FakeGitGateway, filesystem: FilesystemCliGateway | None = None) -> WorktreeService:
@@ -59,6 +59,29 @@ def _request(repo: Path, root: Path, target: Path | str, *, force: bool = False)
 
 def _blockers(error: ExpectedError) -> tuple[str, ...]:
     return tuple(cast(list[str], error.details["remove_blockers"]))
+
+
+class _SnapshotGit(FakeGitGateway):
+    snapshots: tuple[list[FakeGitRecord], list[FakeGitRecord]]
+    list_calls = 0
+
+    def worktree_list(self, repo_root: Path) -> list[FakeGitRecord]:
+        self._record("worktree_list", repo_root)
+        snapshot = self.snapshots[min(self.list_calls, len(self.snapshots) - 1)]
+        self.list_calls += 1
+        return list(snapshot)
+
+
+class _IdentityFilesystem(FilesystemCliGateway):
+    identity_calls = 0
+
+    def path_identity_no_follow(self, path: Path) -> tuple[int, int] | None:
+        self.identity_calls += 1
+        try:
+            info = path.lstat()
+        except OSError:
+            return None
+        return (info.st_dev, info.st_ino)
 
 
 def test_clean_managed_remove_is_git_first_and_keeps_branch(tmp_path: Path) -> None:
@@ -117,7 +140,7 @@ def test_nested_managed_target_is_blocked_before_git_even_with_force(tmp_path: P
             self.cleanup_calls += 1
             super().remove_target_no_follow(path)
 
-        def remove_target_no_follow_bound(self, directory: DirectoryHandle, path: Path) -> None:
+        def remove_target_no_follow_bound(self, directory: DirectoryCapability, path: Path) -> None:
             self.cleanup_calls += 1
             super().remove_target_no_follow_bound(directory, path)
 
@@ -266,7 +289,7 @@ def test_git_failure_after_record_removal_reports_partial_without_cleanup(tmp_pa
             self.cleanup_calls += 1
             super().remove_target_no_follow(path)
 
-        def remove_target_no_follow_bound(self, directory: DirectoryHandle, path: Path) -> None:
+        def remove_target_no_follow_bound(self, directory: DirectoryCapability, path: Path) -> None:
             self.cleanup_calls += 1
             super().remove_target_no_follow_bound(directory, path)
 
@@ -316,7 +339,7 @@ def test_remove_failure_observation_error_keeps_primary_git_diagnostic(tmp_path:
                 raise PermissionError("post-failure inspection denied")
             return super().lstat_kind(path)
 
-        def remove_target_no_follow_bound(self, directory: DirectoryHandle, path: Path) -> None:
+        def remove_target_no_follow_bound(self, directory: DirectoryCapability, path: Path) -> None:
             raise AssertionError("cleanup must not run after Git failure")
 
     git = RemovingGit(
@@ -653,7 +676,7 @@ def test_post_git_cleanup_failure_is_partial_and_branch_is_retained(tmp_path: Pa
     repo, root, target, git = _fixture(tmp_path)
 
     class FailingCleanupFilesystem(FilesystemCliGateway):
-        def remove_target_no_follow_bound(self, directory: DirectoryHandle, path: Path) -> None:
+        def remove_target_no_follow_bound(self, directory: DirectoryCapability, path: Path) -> None:
             raise PermissionError("cleanup denied")
 
     with pytest.raises(ExpectedError) as caught:
@@ -720,3 +743,107 @@ def test_leftover_special_file_is_reported_as_cleanup_partial(tmp_path: Path) ->
     assert result.removed_record is True
     assert result.removed_directory is False
     assert target.exists()
+
+
+@pytest.mark.parametrize(
+    ("changed_branch", "changed_head"),
+    [("feature-renamed", None), (None, "fedcba9876543210")],
+    ids=["branch", "head"],
+)
+def test_refresh_branch_or_head_change_is_blocked_before_git_remove(
+    tmp_path: Path, changed_branch: str | None, changed_head: str | None
+) -> None:
+    repo, root, target, base_git = _fixture(tmp_path)
+    refreshed = _SnapshotGit(
+        checkout_root=base_git.checkout_root,
+        records=list(base_git.records),
+        branches=set(base_git.branches),
+    )
+    refreshed.snapshots = (
+        list(base_git.records),
+        [
+            base_git.records[0],
+            FakeGitRecord(
+                path=target,
+                branch=changed_branch if changed_branch is not None else base_git.records[1].branch,
+                head=changed_head if changed_head is not None else base_git.records[1].head,
+            ),
+        ],
+    )
+
+    with pytest.raises(ExpectedError) as caught:
+        _service(refreshed).remove(_request(repo, root, target))
+
+    assert caught.value.code == "remove_blocked"
+    assert "target_changed_after_refresh" in _blockers(caught.value)
+    assert not [call for call in refreshed.calls if call[0] == "remove_worktree"]
+    assert target.is_dir()
+
+
+def test_refresh_target_identity_change_is_blocked_before_git_remove(tmp_path: Path) -> None:
+    repo, root, target, base_git = _fixture(tmp_path)
+    original = tmp_path / "original-target"
+
+    class ReplacingRefreshGit(FakeGitGateway):
+        snapshots: tuple[list[FakeGitRecord], list[FakeGitRecord]]
+        list_calls = 0
+
+        def worktree_list(self, repo_root: Path) -> list[FakeGitRecord]:
+            self._record("worktree_list", repo_root)
+            snapshot = self.snapshots[min(self.list_calls, len(self.snapshots) - 1)]
+            self.list_calls += 1
+            if self.list_calls == 2:
+                target.rename(original)
+                target.mkdir()
+                (target / "replacement-marker").write_text("replacement", encoding="utf-8")
+            return list(snapshot)
+
+    refreshed = ReplacingRefreshGit(
+        checkout_root=base_git.checkout_root,
+        records=list(base_git.records),
+        branches=set(base_git.branches),
+    )
+    refreshed.snapshots = (list(base_git.records), list(base_git.records))
+    filesystem = _IdentityFilesystem()
+
+    with pytest.raises(ExpectedError) as caught:
+        _service(refreshed, filesystem).remove(_request(repo, root, target, force=True))
+
+    assert caught.value.code == "remove_blocked"
+    assert "target_changed_after_refresh" in _blockers(caught.value)
+    assert not [call for call in refreshed.calls if call[0] == "remove_worktree"]
+    assert filesystem.identity_calls >= 2
+    assert target.is_dir()
+    assert (target / "replacement-marker").is_file()
+
+
+def test_post_git_same_basename_replacement_is_not_cleaned(tmp_path: Path) -> None:
+    repo, root, target, base_git = _fixture(tmp_path)
+    original = tmp_path / "original-target-after-git"
+
+    class ReplacingAfterGit(FakeGitGateway):
+        def remove_worktree_bound(
+            self, repo_root: Path, *, directory: DirectoryCapability, name: str, force: bool
+        ) -> None:
+            super().remove_worktree_bound(repo_root, directory=directory, name=name, force=force)
+            target.rename(original)
+            target.mkdir()
+            (target / "sentinel").write_text("must survive", encoding="utf-8")
+
+    git = ReplacingAfterGit(
+        checkout_root=base_git.checkout_root,
+        records=list(base_git.records),
+        branches=set(base_git.branches),
+    )
+    filesystem = _IdentityFilesystem()
+
+    with pytest.raises(ExpectedError) as caught:
+        _service(git, filesystem).remove(_request(repo, root, target, force=True))
+
+    assert caught.value.code == "post_remove_cleanup_failed"
+    assert caught.value.status == "partial"
+    result = cast(RemoveResult, caught.value.result)
+    assert result.removed_record is True
+    assert result.removed_directory is False
+    assert target.is_dir()
+    assert (target / "sentinel").read_text(encoding="utf-8") == "must survive"

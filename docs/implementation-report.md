@@ -1,191 +1,163 @@
-# P10 実装・品質検証レポート
+# 実装・Final Quality Gate レポート
 
-## 固定点と候補
+## 1. このレポートの証拠境界
 
-- 要件・設計・計画の基準 SHA: `41129b3a3a7f0b913f6181aa4b7fbc7bd3b7f7be`
-- P10 開始時の実装親 SHA: `2224f9dd125e9edd731888c0a84a42d7c4b95ebd`
-- P10 の実装・CI検証対象 SHA: `8e807a4ed357fca87fc205e9cc08008417ba31eb`（`git rev-parse HEAD` で確認）。
-- GitHub Actions run: `32739157960`（上記SHA、8/8 jobs success）。
-- リポジトリ: `chemitaro/worktree-provisioner`
-- ブランチ: `codex/implement-worktree-provisioner`
+この文書は、`worktree-provisioner` の実装候補、既出レビューfinding、修正内容、検証状態を記録する。
+過去の候補SHAや過去のCI runを最終証拠として流用しない。
 
-P10 lane は remote、GitHub、commit、push を実行していない。上記SHAは primary が公開した実装・CI検証対象である。このレポート更新は docs-only であり、上記SHAの descendant として primary が commit する。report自身のcommit SHAは先取りせず、primaryのcommit/push後にその exact SHAでCIと ChatGPT Final Quality Gate Strict を再実行する。
+Git commit は自分自身のSHAを内容へ埋め込めないため、最終提出SHAは「このレポートを含む提出commit」を
+`git rev-parse HEAD` で解決する。最終SHAに紐づくGitHub Actions runとChatGPT Use Strict結果は、GitHubのcheckと
+最終提出メッセージを外部証拠とする。この文書内へ古いrun IDを固定しない。
 
-## フェーズの実装結果
+## 2. 固定点
 
-P0〜P9 は次の順で実装済みである。
+- repository: `chemitaro/worktree-provisioner`
+- branch: `codex/implement-worktree-provisioner`
+- 修正開始時のHEAD / upstream: `f59d43a489d1a64e7bd3daa4da675970a2238b2a`
+- 比較baseline: `origin/main` の `18c80a1f222a31df0617df5c8193388b3c301e0e`
+- 初回Strict reviewer session: `required-strict-github-connector-verificati-447`
+- Strict thinking time: `extra-high`
 
-| Phase | commit | 内容 |
-| --- | --- | --- |
-| P1 | `6c6b0fb` | executable contract tests |
-| P2 | `3ba5fe3` | package/module scaffold |
-| P3a | `df9c761` | application contracts/ports |
-| P3b | `e716dab` | Git adapter and porcelain parser |
-| P3c | `237f48e` | environment, make, filesystem adapters |
-| P4 | `407e436` | create, naming, collision, bootstrap partial |
-| P5 | `e3bf3a0` | list/show inventory and target resolver |
-| P6 | `189ba66` | managed-only remove and cleanup |
-| P7 | `d935e03` | CLI dispatch, text, JSON schema v1 |
-| P8 | `f0fdff0` | Codex skill and thin wrapper |
-| P9 | `2224f9d` | README, packaging, installation, CI |
+このレポート更新時点の候補は未commitである。したがって `f59d43a...` やそれ以前のCIを、現候補の最終成功証拠とは
+扱わない。
 
-P10 では全体 Ruff format の機械的整形、テスト fixture の Protocol 型適合、JSON fixture callback の型注釈、Make runner の型注釈を行った。仕様の意味、CLI の挙動、JSON schema、安全方針は変更していない。`docs/specification/design.md` の差分も Ruff がコードブロック内へ空行を挿入した機械的整形だけである。
+## 3. 初回 Final Quality Gate
 
-P10 の変更ファイルは次のとおりである。
+開始時のexact SHA `f59d43a...` に対するChatGPT Use Strict Extra Highは `review_status=fail` だった。
 
-```text
-docs/specification/design.md
-src/worktree_provisioner/__init__.py
-src/worktree_provisioner/__main__.py
-src/worktree_provisioner/application/ports.py
-src/worktree_provisioner/infra/git_cli.py
-src/worktree_provisioner/infra/make_cli.py
-tests/conftest.py
-tests/integration/test_cli_contracts.py
-tests/integration/test_cli_create.py
-tests/unit/test_create.py
-tests/unit/test_git_porcelain.py
-tests/unit/test_inventory.py
-tests/unit/test_make_cli.py
-tests/unit/test_p1_contracts.py
-tests/unit/test_root_and_naming.py
-docs/implementation-report.md
-```
+- P0: 0
+- P1: 4
+- P2: 1
 
-## Full quality commands
+既出の主要findingは次のとおり。
 
-実行環境は macOS arm64（`Darwin Mac-mini-261.local ... arm64`）、Python `3.14.6`、uv `0.11.24`、Git `2.54.0` である。
+1. removeがpath一致だけを比較し、branch/head変更や同basename置換を見逃す。
+2. `git worktree add` が起動し得るcheckout hook/filterのauthorityが未決。
+3. Make target検出時にもrepository-controlled codeが評価・実行され得るauthorityが未決。
+4. 実装レポートが古いSHA、CI、test件数を最終証拠としていた。
+5. Git診断がcredential-shaped valueを公開し得た。
+
+独立レッドチームは、上記に加えてunknown path observation、traceability、schema evolution、nested remove、
+型境界・重複・診断上限の問題を再現または監査した。
+
+## 4. ブルーチームの修正
+
+### 4.1 remove identity safety
+
+- initial / refreshed Git factsとしてcanonical path、branch、head、detached/bare/locked、lock reasonを比較する。
+- target entryをno-follow `lstat`由来の `(st_dev, st_ino)` で比較する。
+- refresh前後の変更・消失・観測不能はGit mutation前にfail-closedにする。
+- Git成功後に別identityの同basename targetがある場合はcleanupせず、`status=partial` として残す。
+- Git成功後にtargetがmissingならcleanup不要として扱う。
+
+### 4.2 inventory / JSON
+
+- `path_exists` を `bool | None` とし、観測不能をmissingと区別する。
+- 観測不能時は `path_observation_unavailable` blockerを返し、remove不可にする。
+- JSONでは観測不能を `null` として保持する。
+- このtype changeに必要なschema majorはowner decision Round 6で確定する。
+
+### 4.3 diagnostic safety
+
+- Git / Makeの外部診断を共通utilityでredactしてから4096文字へ制限する。
+- TOKEN、PASSWORD、SECRET、API key、Authorization/Bearer形式のcredential-shaped valueを伏せる。
+- 全limit値で `len(result) <= max(limit, 0)` を保証する。
+- collision classificationはredaction前のraw Git diagnosticで行い、公開値だけをredactする。
+
+### 4.4 code boundary / maintainability
+
+- descriptor-bound directory operationをformal Protocolへ昇格し、production mutation pathの`getattr` fallbackを削除した。
+- Git porcelain parserをbytes-onlyのNUL-delimited `-z` contractへ限定した。
+- public error/status/operation境界をLiteral typeで表現した。
+- bootstrap gatewayのtyped resultを直接利用し、coercionとcompatibility aliasesを削除した。
+- inventoryの8要素tupleをnamed dataclassへ置換した。
+- duplicate diagnostic helper、dead wrapper、unused field、optional-only branch、重複test fixtureを整理した。
+
+### 4.5 acceptance / traceability
+
+- manifestの `path::symbol` が実在することをtestで検証する。
+- AC-015をskill create、AC-018をdistribution/CI contractへ対応させた。
+- macOS/Linux × Python 3.10〜3.13、locked sync、quality commands、build、fresh-wheel smokeをCI static contractとして固定した。
+- remove identity、unknown path、diagnostic redaction、nullable JSONの回帰testを追加した。
+
+## 5. レッドチーム閉鎖状態
+
+既出のコード標準finding ST-1〜ST-10は、修正後のread-only closure checkで全件closedとなった。
+このclosure checkは新規全面レビューではなく、既出findingの解消確認である。
+
+仕様側では次をclosed確認済み。
+
+- unknown path observationとmissingの区別
+- AC-015 / AC-018 traceabilityおよびmanifest symbol検証
+- removeのGit facts / target identity比較
+- credential-shaped Git diagnosticの非公開化
+
+Round 6のowner authorityと仕様同期もclosed確認済みである。残る作業は、現在のレポートを含む最終候補の検証、
+最終SHAのCI、同一Strict sessionのfollow-upである。
+
+## 6. Owner decision closure
+
+2026-08-30にownerが `docs/interview.md` Round 6のQ27〜Q31をすべてAとして確定した。
+
+- OD-022: nested managed worktreeはlist/showで観測可能とし、removeはdirect childだけを許可する。`--force`でも迂回しない。
+- OD-023: trusted repositoryのみを対象とし、Git checkout hook / clean・smudge・process filterは抑止しない。
+  `--no-bootstrap` はMake bootstrapだけを無効化する。
+- OD-024: Make target検出自体もrepository-controlled behaviorを評価・実行し得るものとして、trusted repositoryだけを対象とする。
+- OD-025: 検出可能なGit/target identity変更はfail-closedまたはpartialとし、最終checkからGit/kernel syscallまでの
+  same-user noncooperative raceは非atomicな保証上限としてscope外にする。
+- OD-026: nullable `path_exists` はJSON schema v2とし、v1互換を維持しない。
+
+requirement / design / plan / README / CLI help / skill / JSON schema / testsは、上記決定へ同期済みである。
+
+### 6.1 ChatGPT Use advisory analysis
+
+2026-08-30に新規ChatGPT Use session `required-repository-connector-context-repository-133` をGPT-5.6 Sol / Extra Highで
+実行し、現行仕様・実装・テスト・レポートの19ファイルを分析した。最終Strict reviewer sessionとは分離している。
+
+分析結果はQ27〜Q31のすべてで推奨案Aを支持した。
+
+- Q27: 現行のdirect-child blocker実装を維持し、core production追加修正は不要。
+- Q28: Git hook/filterを抑止せず、trusted repository境界と `--no-bootstrap` の限定された意味をhelp/README/skillへ同期する。
+- Q29: Make detection方式を維持し、detection自体もtrust-freeではないことをhelp/README/skillへ同期する。
+- Q30: 現行identity hardeningを維持し、final syscall windowの保証上限を明記する。
+- Q31: schema version `2` へのmachine-visible production変更と、version-labelled module/docs/testsの同期が必要。
+
+この分析はadvisoryとして扱い、その後ownerが同じ5案を独立に承認したため、実装契約へ採用した。
+
+## 7. 現候補の暫定ローカル証拠
+
+コード標準修正後、Round 6のpending metadata追加前にブルーチームが次を実行した。
 
 | Command | Result |
 | --- | --- |
-| `uv sync --all-groups --locked` | PASS (`Resolved 16 packages`, `Checked 13 packages`) |
-| `uv run ruff format .` | PASS; 既知の format debt 12 files を機械的に整形 |
-| `uv run ruff format --check .` | PASS; `47 files already formatted` |
-| `uv run ruff check .` | PASS; `All checks passed!` |
-| `uv run mypy src tests` | PASS; `Success: no issues found in 39 source files` |
-| `uv run pytest -q` | PASS; `205 passed` |
-| `uv build` | PASS; wheel と sdist を生成 |
+| focused tests | PASS、70 passed |
+| `uv run ruff format --check .` | PASS |
+| `uv run ruff check .` | PASS |
+| `uv run mypy src tests` | PASS |
+| `uv run pytest -q` | PASS、348 passed / 1 skipped |
 | `git diff --check` | PASS |
 
-mypy は P10 修正前に test fixture / JSON callback / Make runner の型エラー36件を報告した。production の挙動を変えず、Protocol cast、typed fake adapter、`Callable[[str], dict[str, Any]]`、typed runner に限定して修正し、最終的に0件となった。
+これは途中候補の証拠であり、owner decision反映後の最終ローカル品質ゲートを代替しない。
 
-## 配布物と clean install
+それ以前の途中候補では `uv build` がwheel / sdistを生成し、新規 `worktree_provisioner/diagnostics.py` が両配布物へ
+収録されることを確認した。このbuildも最終配布物の証拠には使わず、最終候補で再実行する。
 
-生成物は次のとおりである。
+Round 6反映後の最終候補では、locked sync、Ruff format、Ruff lint、Mypy、Pytest（351 passed / 1 skipped）、
+build、fresh-wheel smoke、wrapper shell syntax、`git diff --check`を再実行した。生成物のSHA-256は次のとおり。
 
-| Artifact | SHA-256 |
-| --- | --- |
-| `dist/worktree_provisioner-0.1.0-py3-none-any.whl` | `d92eb1b94756ce649e10cab0aeb49d03a18ad848a95df2387249c52c4f951888` |
-| `dist/worktree_provisioner-0.1.0.tar.gz` | `73c94fb1bfda73a1ef0da4d023c36cad7772fe752c56c1030b405c2fbd758bb9` |
+- wheel: `854a976b7be03284b738eb3d8abac945b45ddb3a2762c0eb7b84a4703d0eb0f6`
+- sdist: `f33857a85fa03ff85be144a283322076603ed73a9130afd795ee5a3896edaea2`
 
-wheel の検査結果:
+## 8. 最終完了条件
 
-- 22 files。`worktree_provisioner` package、entry point metadata、`dist-info/licenses/LICENSE` を含む。
-- `METADATA` に `Requires-Dist` は存在しない。runtime Python dependency はない。
-- wheel には Python runtime を、sdist には README、仕様書、`skills/worktree-provisioner/SKILL.md`、thin wrapper source を含む。
-- source distribution は `LICENSE`、README、仕様書、JSON schema、skill source を含むことを `tar -tzf` で確認した。P10 handoff report 自体は配布物の自己参照を避けるため sdist から除外している。
+次をすべて満たした場合だけ完成とする。
 
-Hatch の sdist exclude 設定追加後、report 更新前のbuildと、reportのhash/format件数更新後のbuildを比較した。両buildで wheel は `d92eb1b94756ce649e10cab0aeb49d03a18ad848a95df2387249c52c4f951888`、sdist は `73c94fb1bfda73a1ef0da4d023c36cad7772fe752c56c1030b405c2fbd758bb9` となり、report更新による自己参照hash変動は発生しなかった。
+- [x] Round 6のQ27〜Q31がowner answerとして確定している。
+- [x] requirement / design / plan / README / help / skill / JSON schema / testsが回答と一致する。
+- [x] 最終候補でRuff format、Ruff lint、Mypy、Pytest、build、fresh-wheel smoke、`git diff --check`が成功する。
+- [ ] 最終候補をtask branchへcommit / pushする。
+- [ ] 最終SHAに対するGitHub Actions macOS/Linux × Python 3.10〜3.13が全job成功する。
+- [ ] 同一Strict reviewer sessionをExtra Highでfollow-upし、P0=0、P1=0、`review_status=pass`を得る。
+- [ ] 最終提出でexact SHA、CI run、Strict結果、配布物hash、残るscope外を報告する。
 
-管理された一時 session 内の clean virtual environment へ、次のコマンドで `--no-deps` install した。
-
-```text
-pip install --force-reinstall --no-deps dist/worktree_provisioner-0.1.0-py3-none-any.whl
-```
-
-インストール後の smoke は次の6 commandすべて exit `0` だった。
-
-```text
-worktree-provisioner --help
-worktree-provisioner --version
-worktree-provisioner create --help
-worktree-provisioner list --help
-worktree-provisioner show --help
-worktree-provisioner remove --help
-```
-
-出力には top-level の `create`, `list`, `show`, `remove` と version `0.1.0` が含まれた。検証後、一時 virtual environment は codex-tmp の管理コマンドで削除した。
-
-## JSON schema と実行サンプル
-
-JSON の正本は [`docs/json-schema-v1.md`](json-schema-v1.md) である。テストは `tests/integration/test_cli_schema.py`、`tests/unit/test_json_v1.py`、各 command integration suite にある。
-
-macOS 上の clean-install CLI で `list --json` を実行し、stdout に exactly one JSON document、stderr 空、exit `0` を確認した。代表的な envelope は次の形である。
-
-```json
-{
-  "schema_version": 1,
-  "status": "ok",
-  "operation": "list",
-  "result": {"worktrees": [{"id": "main", "managed": false, "removable": false}]},
-  "error": null,
-  "warnings": []
-}
-```
-
-target を省略した `show --json` は exit `2` で、stdout に次の schema v1 error を1文書だけ返した。
-
-```json
-{
-  "schema_version": 1,
-  "status": "error",
-  "operation": "show",
-  "result": null,
-  "error": {"code": "usage_error", "message": "invalid command-line usage", "details": {"diagnostic": "the following arguments are required: target"}},
-  "warnings": []
-}
-```
-
-## Skill / wrapper
-
-- `uv run pytest tests/integration/test_skill_wrapper.py -q`: PASS、`11 passed`。
-- `sh -n skills/worktree-provisioner/scripts/worktree-provisioner`: PASS。
-- `quick_validate.py skills/worktree-provisioner`: PASS、`Skill is valid!`。
-- ShellCheck はこの macOS 環境にインストールされていなかったため未実行（代替として `sh -n` は実行済み）。
-- wrapper は PATH 上の installed CLI の argv/stdout/stderr/exit status を伝播するだけで、Git、root、target、bootstrap、cleanup、task lifecycle のロジックを持たない。
-
-## Static scope / prototype audit
-
-次の production source checks はすべて PASS だった。
-
-```text
-no spec_dock_runtime in src/worktree_provisioner
-no SPEC_DOCK_WORKTREE_ROOT in src/worktree_provisioner
-no /Volumes/990p2t/workspace/worktrees in src/worktree_provisioner
-no worktree status/prune/repair, branch delete, github issue, or workbench operation in src/worktree_provisioner
-```
-
-`src/worktree_provisioner/core.py` と `tests/test_cli.py` は存在せず、prototype removal check は PASS だった。`rg --files | rg '[A-Z]'` の結果は `README.md`、`LICENSE`、`skills/worktree-provisioner/SKILL.md` の必要な慣例だけであり、追加の不用意な uppercase path はなかった。README の `SPEC_DOCK_WORKTREE_ROOT` 言及は非対応であることを説明する文書上の記述であり、production lookup ではない。
-
-## Safety checklist
-
-- [x] legacy env lookupなし（production source）
-- [x] machine root defaultなし
-- [x] namespace symlink の create/remove 拒否
-- [x] external remove 拒否
-- [x] locked worktree は force でも拒否
-- [x] default remove は non-force
-- [x] force は明示された一回だけ
-- [x] remove final refresh あり
-- [x] Git failure 後の filesystem cleanup なし
-- [x] target-only no-follow cleanup
-- [x] branch deletion なし
-- [x] bootstrap failure は partial/non-zero/no rollback
-- [x] JSON は one-document contract
-- [x] skill wrapper は thin
-- [x] skill の force authorization は explicit
-- [x] Codex task lifecycle mutation なし
-- [x] SpecDock repository の変更なし（本P10 laneの変更範囲は本repositoryのみ）
-
-安全シナリオの実行証拠は `tests/scenario_provenance.json` と、`tests/integration/test_cli_contracts.py`、`tests/integration/test_cli_remove.py`、`tests/unit/test_remove.py` に対応する。全体テストは205件 passした。
-
-## Platform evidence と残る制限
-
-- macOS: 上記 full quality、clean wheel install、CLI smoke、JSON samples、skill validation をこの macOS arm64 環境で実行済み。
-- GitHub Actions run `32739157960`: 実装・CI検証対象SHA `8e807a4ed357fca87fc205e9cc08008417ba31eb` に対して、macOS/Linux × Python `3.10`〜`3.13` の8/8 jobsが成功した。各jobで `uv sync --locked --all-groups`、`uv run ruff format --check .`、`uv run ruff check .`、`uv run mypy src tests`、`uv run pytest -q`（205 passed）、`uv build`、installed wheel smokeを実行済みである。これはmacOSローカル証拠とは別のGitHub Actions証拠であり、Linuxもこのrunで実行済みである。
-- 同runのNode 20 deprecation annotationsは外部actionのnon-blocking warningであり、8/8 jobsの成功を妨げていない。
-- Windows: 初期版の対応対象外。
-- package registry publication、tag/release、protected branch 設定変更は未実施であり、計画スコープ外。
-- このdocs-only report commitはCI検証対象SHAのdescendantになる。primaryはそのexact SHAに対してCIと ChatGPT Final Quality Gate Strict を再実行し、report commit自身のSHAとgate resultを後続更新で確定する。
-
-P10 のローカル実装・GitHub Actions品質検証ステータスは PASS である。docs-only report commit後のexact SHAに対するCI再実行と ChatGPT Final Quality Gate Strict の完了をもって最終提出とする。
+現時点のstatusは **in progress** であり、Final Quality Gate passをまだ主張しない。

@@ -18,9 +18,10 @@ from pathlib import Path
 from typing import BinaryIO, Final, Protocol, cast
 
 from worktree_provisioner.application.contracts import BootstrapResult
+from worktree_provisioner.diagnostics import DIAGNOSTIC_LIMIT
+from worktree_provisioner.diagnostics import safe_bounded as _safe_bounded
 
 _MAKE_COMMAND: Final[str] = "make"
-_DIAGNOSTIC_LIMIT: Final[int] = 4096
 _STREAM_CHUNK_SIZE: Final[int] = 8192
 _MAKEFILE_NAMES: Final[tuple[str, ...]] = ("GNUmakefile", "makefile", "Makefile")
 _DATABASE_OUTPUT_LIMIT: Final[int] = 1024 * 1024
@@ -67,12 +68,6 @@ class MakeAdapterError(RuntimeError):
         detail = self.diagnostic
         suffix = f": {detail}" if detail else ""
         super().__init__(f"{message}{suffix}")
-
-
-# Descriptive aliases make the typed adapter boundary discoverable without
-# creating separate exception contracts.
-MakeCommandError = MakeAdapterError
-BootstrapAdapterError = MakeAdapterError
 
 
 @dataclass(frozen=True, slots=True)
@@ -272,10 +267,6 @@ class MakeCliGateway:
         return _run_direct_detection(self.make_executable, cwd), False
 
 
-MakeGateway = MakeCliGateway
-BootstrapCliGateway = MakeCliGateway
-
-
 def _validated_worktree_path(path: Path) -> Path:
     if not isinstance(path, Path):
         raise MakeAdapterError(
@@ -335,45 +326,16 @@ def _diagnostic(stdout: str | None, stderr: str | None) -> str:
         return ""
     if len(streams) == 1:
         label, value = streams[0]
-        return f"{label}: {_safe_bounded(value, limit=_DIAGNOSTIC_LIMIT - len(label) - 2)}"
+        return f"{label}: {_safe_bounded(value, limit=DIAGNOSTIC_LIMIT - len(label) - 2)}"
 
     prefix_budget = len("stderr: ") + len("stdout: ") + 1
-    content_budget = max(0, _DIAGNOSTIC_LIMIT - prefix_budget)
+    content_budget = max(0, DIAGNOSTIC_LIMIT - prefix_budget)
     first_budget = content_budget // 2
     second_budget = content_budget - first_budget
     return (
         f"stderr: {_safe_bounded(streams[0][1], limit=first_budget)}\n"
         f"stdout: {_safe_bounded(streams[1][1], limit=second_budget)}"
     )
-
-
-def _bounded(value: str, *, limit: int = _DIAGNOSTIC_LIMIT) -> str:
-    if len(value) <= limit:
-        return value
-    if limit <= 1:
-        return value[:limit]
-    return f"{value[: limit - 1]}…"
-
-
-_SECRET_ASSIGNMENT = re.compile(
-    r"(?i)(?P<prefix>[A-Z0-9_.-]*(?:TOKEN|PASSWORD|SECRET|AUTHORIZATION|API[_-]?KEY)[A-Z0-9_.-]*\s*[:=]\s*)(?P<value>[^\s,;]+)"
-)
-_AUTHORIZATION_HEADER = re.compile(r"(?im)(?P<prefix>\bAuthorization\b\s*:\s*)(?:Bearer\s+)?[^\r\n]+")
-_BEARER_TOKEN = re.compile(r"(?i)\bBearer\s+[^\s,;]+")
-
-
-def _redact_secrets(value: str) -> str:
-    """Remove representative credential values before diagnostics escape."""
-
-    redacted = _SECRET_ASSIGNMENT.sub(r"\g<prefix>[REDACTED]", value)
-    redacted = _AUTHORIZATION_HEADER.sub(r"\g<prefix>[REDACTED]", redacted)
-    return _BEARER_TOKEN.sub("Bearer [REDACTED]", redacted)
-
-
-def _safe_bounded(value: str, *, limit: int = _DIAGNOSTIC_LIMIT) -> str:
-    """Redact first, then apply the externally visible hard character bound."""
-
-    return _bounded(_redact_secrets(value), limit=limit)
 
 
 def _bounded_completed_process(completed: subprocess.CompletedProcess[str]) -> subprocess.CompletedProcess[str]:
@@ -573,15 +535,8 @@ def _is_plain_missing_target_failure(stderr: str) -> bool:
     )
 
 
-def _database_has_target(output: str, target: str) -> bool | None:
-    """Compatibility wrapper for callers that only need target presence."""
-
-    facts = _database_facts(output, target)
-    return None if facts is None else facts[0]
-
-
 def _run_bounded_process(
-    argv: tuple[str, ...], cwd: Path, *, retain_limit: int = _DIAGNOSTIC_LIMIT
+    argv: tuple[str, ...], cwd: Path, *, retain_limit: int = DIAGNOSTIC_LIMIT
 ) -> subprocess.CompletedProcess[str]:
     """Run a command while draining both pipes and retaining only a prefix.
 
@@ -644,10 +599,6 @@ def _contains_make_target(output: str, target: str) -> bool:
 
 
 __all__ = [
-    "BootstrapAdapterError",
-    "BootstrapCliGateway",
     "MakeAdapterError",
     "MakeCliGateway",
-    "MakeCommandError",
-    "MakeGateway",
 ]

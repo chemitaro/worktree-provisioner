@@ -15,6 +15,8 @@ from worktree_provisioner.application.contracts import (
     BootstrapResult,
     CreateRequest,
     CreateResult,
+    ErrorCode,
+    ErrorStatus,
     ExpectedError,
     GitWorktreeRecord,
     ListRequest,
@@ -28,7 +30,7 @@ from worktree_provisioner.application.contracts import (
     WorktreeOrigin,
     WorktreeRecordView,
 )
-from worktree_provisioner.application.ports import ApplicationPorts
+from worktree_provisioner.application.ports import ApplicationPorts, FilesystemGateway, PathIdentity
 from worktree_provisioner.application.root_and_naming import (
     MAX_CANDIDATE_ATTEMPTS,
     LabelValidationError,
@@ -43,9 +45,9 @@ from worktree_provisioner.application.root_and_naming import (
     validate_root,
 )
 from worktree_provisioner.application.target_resolver import TargetResolutionError, resolve_target
+from worktree_provisioner.diagnostics import bounded as _bounded
 
 _DETECTION_COMMAND: Final[tuple[str, ...]] = ("make", "-n", "init")
-_DIAGNOSTIC_LIMIT: Final[int] = 4096
 _COLLISION_WARNING_CODE: Final[str] = "collision_partial_artifact"
 
 
@@ -53,8 +55,21 @@ _COLLISION_WARNING_CODE: Final[str] = "collision_partial_artifact"
 class _NamespaceContext:
     namespace: Path
     available: bool
-    reason: str
     exists: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _InventoryProvisional:
+    """Named intermediate fields used while assigning stable inventory IDs."""
+
+    record: GitWorktreeRecord
+    main: bool
+    current: bool
+    path_exists: bool | None
+    raw_id: str
+    sort_path: str
+    managed: bool
+    classification_available: bool
 
 
 class WorktreeService:
@@ -265,6 +280,23 @@ class WorktreeService:
         if initial_blockers:
             raise self._remove_blocked(request, initial, initial_blockers)
 
+        try:
+            initial_target_identity = self.ports.filesystem.path_identity_no_follow(initial.path)
+        except Exception as exc:
+            raise self._remove_blocked(
+                request,
+                initial,
+                ("path_observation_unavailable",),
+                message="worktree target identity could not be observed before remove refresh",
+            ) from exc
+        if initial_target_identity is None:
+            raise self._remove_blocked(
+                request,
+                initial,
+                ("path_missing",),
+                message="worktree target disappeared before remove refresh",
+            )
+
         # Refresh every Git record and rebuild classification using the same
         # root and repository namespace immediately before mutation.
         refreshed_namespace = self._validate_remove_namespace(root, repo_basename)
@@ -305,6 +337,36 @@ class WorktreeService:
             repo_root=request.repo_root,
             main_worktree_path=refreshed_main_worktree_path,
         )
+
+        try:
+            refreshed_target_identity = self.ports.filesystem.path_identity_no_follow(refreshed.path)
+        except Exception as exc:
+            blockers = tuple(
+                dict.fromkeys(("target_changed_after_refresh", "path_observation_unavailable", *refreshed_blockers))
+            )
+            raise self._remove_blocked(
+                request,
+                refreshed,
+                blockers,
+                message="worktree target identity could not be confirmed after remove refresh",
+            ) from exc
+        if refreshed_target_identity is None or refreshed_target_identity != initial_target_identity:
+            blockers = tuple(dict.fromkeys(("target_changed_after_refresh", *refreshed_blockers)))
+            raise self._remove_blocked(
+                request,
+                refreshed,
+                blockers,
+                message="worktree target changed during remove refresh",
+            )
+        if _git_record_identity(initial) != _git_record_identity(refreshed):
+            blockers = tuple(dict.fromkeys(("target_changed_after_refresh", *refreshed_blockers)))
+            raise self._remove_blocked(
+                request,
+                refreshed,
+                blockers,
+                message="worktree record changed during remove refresh",
+            )
+
         if refreshed_blockers:
             raise self._remove_blocked(request, refreshed, refreshed_blockers)
 
@@ -365,6 +427,7 @@ class WorktreeService:
             namespace=refreshed_namespace,
             target=refreshed,
             main_worktree_path=refreshed_main_worktree_path,
+            expected_identity=initial_target_identity,
         )
         if cleanup_error is not None:
             raise self._error(
@@ -590,8 +653,27 @@ class WorktreeService:
         namespace: Path,
         target: WorktreeRecordView,
         main_worktree_path: Path,
+        expected_identity: PathIdentity,
     ) -> dict[str, object] | None:
         """Recheck containment and clean only the exact leftover target."""
+
+        try:
+            actual_identity = self.ports.filesystem.path_identity_no_follow(target.path)
+        except Exception as exc:
+            return {
+                "reason": "target_inspection_failed",
+                "path": str(target.path),
+                "diagnostic": _bounded(str(exc)),
+            }
+        if actual_identity is None:
+            return None
+        if actual_identity != expected_identity:
+            return {
+                "reason": "target_changed_after_git",
+                "path": str(target.path),
+                "expected_identity": expected_identity,
+                "actual_identity": actual_identity,
+            }
 
         try:
             kind = self.ports.filesystem.lstat_kind(namespace)
@@ -628,23 +710,15 @@ class WorktreeService:
             }
         return None
 
-    def _remove_target(self, namespace: Path, target: Path, *, root: Path | None = None) -> None:
+    def _remove_target(self, namespace: Path, target: Path, *, root: Path) -> None:
         """Remove a leftover target through a namespace-bound capability."""
 
-        open_directory = getattr(self.ports.filesystem, "open_directory", None)
-        remove_bound = getattr(self.ports.filesystem, "remove_target_no_follow_bound", None)
-        if callable(open_directory) and callable(remove_bound):
-            if root is None:
-                with open_directory(namespace) as directory:
-                    remove_bound(directory, target)
-            else:
-                with open_directory(root) as root_directory, open_directory(namespace) as directory:
-                    bind_root = getattr(directory, "bind_root", None)
-                    if callable(bind_root):
-                        bind_root(root_directory)
-                    remove_bound(directory, target)
-            return
-        self.ports.filesystem.remove_target_no_follow(target)
+        with (
+            self.ports.filesystem.open_directory(root) as root_directory,
+            self.ports.filesystem.open_directory(namespace) as directory,
+        ):
+            directory.bind_root(root_directory)
+            self.ports.filesystem.remove_target_no_follow_bound(directory, target)
 
     def _remove_worktree(
         self,
@@ -657,31 +731,27 @@ class WorktreeService:
     ) -> None:
         """Remove a managed worktree through a root-bound namespace fd."""
 
-        open_directory = getattr(self.ports.filesystem, "open_directory", None)
-        remove_bound = getattr(self.ports.git, "remove_worktree_bound", None)
-        if callable(open_directory) and callable(remove_bound):
-            lexical_path = _absolute_lexical_path(path)
-            lexical_namespace = _absolute_lexical_path(namespace)
-            try:
-                relative = lexical_path.relative_to(lexical_namespace)
-            except ValueError as exc:
-                raise RuntimeError("managed worktree path is not a strict namespace descendant") from exc
-            if not relative.parts:
-                raise RuntimeError("managed worktree path is not a strict namespace descendant")
-            parent_path = lexical_path.parent
-            target_name = lexical_path.name
-            with open_directory(root) as root_directory, open_directory(parent_path) as directory:
-                bind_root = getattr(directory, "bind_root", None)
-                if callable(bind_root):
-                    bind_root(root_directory)
-                remove_bound(
-                    repo_root,
-                    directory=directory,
-                    name=target_name,
-                    force=force,
-                )
-            return
-        self.ports.git.remove_worktree(repo_root, path=path, force=force)
+        lexical_path = _absolute_lexical_path(path)
+        lexical_namespace = _absolute_lexical_path(namespace)
+        try:
+            relative = lexical_path.relative_to(lexical_namespace)
+        except ValueError as exc:
+            raise RuntimeError("managed worktree path is not a strict namespace descendant") from exc
+        if not relative.parts:
+            raise RuntimeError("managed worktree path is not a strict namespace descendant")
+        parent_path = lexical_path.parent
+        target_name = lexical_path.name
+        with (
+            self.ports.filesystem.open_directory(root) as root_directory,
+            self.ports.filesystem.open_directory(parent_path) as directory,
+        ):
+            directory.bind_root(root_directory)
+            self.ports.git.remove_worktree_bound(
+                repo_root,
+                directory=directory,
+                name=target_name,
+                force=force,
+            )
 
     def _inventory_views(
         self,
@@ -706,7 +776,7 @@ class WorktreeService:
         namespace = self._namespace_context(root, repo_basename, operation=operation)
         current_path = canonical_path(repo_root)
 
-        provisional: list[tuple[GitWorktreeRecord, bool, bool, bool, str, str, bool, bool]] = []
+        provisional: list[_InventoryProvisional] = []
         for index, record in enumerate(records):
             path = _record_path(record)
             canonical_record_path = _record_canonical_path(record)
@@ -721,23 +791,27 @@ class WorktreeService:
                 repo_basename=repo_basename,
             )
             provisional.append(
-                (
-                    record,
-                    main,
-                    current,
-                    path_exists is True,
-                    raw_id,
-                    canonical_record_path.as_posix(),
-                    managed,
-                    namespace.available,
+                _InventoryProvisional(
+                    record=record,
+                    main=main,
+                    current=current,
+                    path_exists=path_exists,
+                    raw_id=raw_id,
+                    sort_path=canonical_record_path.as_posix(),
+                    managed=managed,
+                    classification_available=namespace.available,
                 )
             )
 
         stable_ids = _disambiguate_ids(provisional)
         views: list[WorktreeRecordView] = []
-        for index, (record, main, current, path_exists, _raw_id, _sort_path, managed, available) in enumerate(
-            provisional
-        ):
+        for index, item in enumerate(provisional):
+            record = item.record
+            main = item.main
+            current = item.current
+            path_exists = item.path_exists
+            managed = item.managed
+            available = item.classification_available
             blockers = _remove_blockers(
                 main=main,
                 current=current,
@@ -792,11 +866,11 @@ class WorktreeService:
                 operation=operation,
             ) from exc
         if kind == "symlink":
-            return _NamespaceContext(namespace=namespace, available=False, reason="namespace_symlink", exists=False)
+            return _NamespaceContext(namespace=namespace, available=False, exists=False)
         if kind == "missing":
-            return _NamespaceContext(namespace=namespace, available=True, reason="root_valid", exists=False)
+            return _NamespaceContext(namespace=namespace, available=True, exists=False)
         if kind == "directory":
-            return _NamespaceContext(namespace=namespace, available=True, reason="root_valid", exists=True)
+            return _NamespaceContext(namespace=namespace, available=True, exists=True)
         raise self._error(
             code="unsafe_namespace",
             message=f"managed namespace is not a real directory: {namespace}",
@@ -1028,25 +1102,19 @@ class WorktreeService:
         namespace: Path,
         candidate: WorktreeCandidate,
     ) -> None:
-        """Use the descriptor-bound adapter path when available."""
+        """Add a worktree through a root-bound namespace capability."""
 
-        open_directory = getattr(self.ports.filesystem, "open_directory", None)
-        add_worktree_bound = getattr(self.ports.git, "add_worktree_bound", None)
-        if callable(open_directory) and callable(add_worktree_bound):
-            with open_directory(root) as root_directory, open_directory(namespace) as directory:
-                bind_root = getattr(directory, "bind_root", None)
-                if callable(bind_root):
-                    bind_root(root_directory)
-                add_worktree_bound(
-                    repo_root,
-                    directory=directory,
-                    name=candidate.path.name,
-                    branch=candidate.branch,
-                )
-            return
-        # Test doubles and third-party ports that implement the original
-        # narrow protocol keep the existing fixed Git operation semantics.
-        self.ports.git.add_worktree(repo_root, path=candidate.path, branch=candidate.branch)
+        with (
+            self.ports.filesystem.open_directory(root) as root_directory,
+            self.ports.filesystem.open_directory(namespace) as directory,
+        ):
+            directory.bind_root(root_directory)
+            self.ports.git.add_worktree_bound(
+                repo_root,
+                directory=directory,
+                name=candidate.path.name,
+                branch=candidate.branch,
+            )
 
     def _result_after_add(
         self,
@@ -1088,7 +1156,7 @@ class WorktreeService:
                 exit_code=None,
                 detail=_bounded(str(exc)),
             )
-        return _coerce_bootstrap_result(raw)
+        return raw
 
     def _observe_artifacts(
         self,
@@ -1265,43 +1333,47 @@ class WorktreeService:
     def _error(
         self,
         *,
-        code: str,
+        code: ErrorCode,
         message: str,
         details: Mapping[str, object],
         result: object | None = None,
-        status: str = "error",
+        status: ErrorStatus = "error",
         operation: Operation = "create",
         warnings: Sequence[ResultWarning] = (),
     ) -> ExpectedError:
-        # The typed Literal contract is intentionally enforced at the shared
-        # boundary; local adapter diagnostics cannot invent a public status.
-        response_status = "partial" if status == "partial" else "error"
         return ExpectedError(
-            code=code,  # type: ignore[arg-type]
+            code=code,
             operation=operation,
             message=message,
             details=details,
             result=result,
-            status=response_status,  # type: ignore[arg-type]
+            status=status,
             warnings=tuple(warnings),
         )
 
 
-def create_worktree(request: CreateRequest, ports: ApplicationPorts) -> CreateResult:
-    """Functional entry point kept beside :class:`WorktreeService`."""
-
-    return WorktreeService(ports).create(request)
+def _record_path(record: GitWorktreeRecord) -> Path:
+    return record.path
 
 
-def _record_path(record: object) -> Path:
-    path = getattr(record, "path", None)
-    if not isinstance(path, Path):
-        raise ValueError("Git worktree record path must be a pathlib.Path")
-    return path
-
-
-def _record_canonical_path(record: object) -> Path:
+def _record_canonical_path(record: GitWorktreeRecord) -> Path:
     return canonical_path(_record_path(record))
+
+
+def _git_record_identity(
+    record: WorktreeRecordView,
+) -> tuple[Path, str | None, str | None, bool, bool, bool, str | None]:
+    """Return the mutable Git facts that must remain stable across refresh."""
+
+    return (
+        canonical_path(record.path),
+        record.branch,
+        record.head,
+        record.detached,
+        record.bare,
+        record.locked,
+        record.lock_reason,
+    )
 
 
 def _absolute_lexical_path(path: Path) -> Path:
@@ -1326,9 +1398,7 @@ def _is_nested_descendant(path: Path, namespace: Path) -> bool:
     return len(relative.parts) > 1
 
 
-def _disambiguate_ids(
-    provisional: Sequence[tuple[GitWorktreeRecord, bool, bool, bool, str, str, bool, bool]],
-) -> list[str]:
+def _disambiguate_ids(provisional: Sequence[_InventoryProvisional]) -> list[str]:
     """Suffix duplicate raw ids by canonical path order, preserving list order."""
 
     groups: dict[str, list[tuple[int, str]]] = {}
@@ -1338,11 +1408,11 @@ def _disambiguate_ids(
     # reserved selector ``main`` even if another record's basename is also
     # ``main`` and would sort before it lexically.
     for index, item in enumerate(provisional):
-        if item[1]:
+        if item.main:
             assigned[index] = "main"
             used.add("main")
             continue
-        groups.setdefault(item[4], []).append((index, item[5]))
+        groups.setdefault(item.raw_id, []).append((index, item.sort_path))
     for raw_id in sorted(groups):
         ordered = sorted(groups[raw_id], key=lambda value: value[1])
         for ordinal, (index, _sort_path) in enumerate(ordered, start=1):
@@ -1362,7 +1432,7 @@ def _remove_blockers(
     current: bool,
     bare: bool,
     locked: bool,
-    path_exists: bool,
+    path_exists: bool | None,
     managed: bool,
     classification_available: bool,
     nested_managed: bool,
@@ -1376,8 +1446,10 @@ def _remove_blockers(
         blockers.append("bare_worktree")
     if locked:
         blockers.append("locked_worktree")
-    if not path_exists:
+    if path_exists is False:
         blockers.append("path_missing")
+    elif path_exists is None:
+        blockers.append("path_observation_unavailable")
     if classification_available:
         if not managed:
             blockers.append("outside_managed_namespace")
@@ -1388,43 +1460,11 @@ def _remove_blockers(
     return tuple(blockers)
 
 
-def _observe_path(filesystem: object, path: Path) -> bool | None:
+def _observe_path(filesystem: FilesystemGateway, path: Path) -> bool | None:
     try:
-        return bool(filesystem.path_exists_no_follow(path))  # type: ignore[attr-defined]
+        return bool(filesystem.path_exists_no_follow(path))
     except Exception:
         return None
-
-
-def _coerce_bootstrap_result(raw: object) -> BootstrapResult:
-    status = getattr(raw, "status", "detection_failed")
-    command_value = getattr(raw, "command", None)
-    exit_code = getattr(raw, "exit_code", None)
-    detail = getattr(raw, "detail", None)
-    if not isinstance(detail, str) and detail is not None:
-        detail = str(detail)
-    if status == "disabled":
-        return BootstrapResult(False, "disabled", None, None, detail)
-    if status == "skipped":
-        return BootstrapResult(True, "skipped", None, None, detail)
-    if status == "succeeded":
-        command = _command_tuple(command_value, ("make", "init"))
-        return BootstrapResult(True, "succeeded", command, 0, detail)
-    if status == "failed":
-        command = _command_tuple(command_value, ("make", "init"))
-        nonzero = exit_code if isinstance(exit_code, int) and exit_code != 0 else 1
-        return BootstrapResult(True, "failed", command, nonzero, detail)
-    command = _command_tuple(command_value, _DETECTION_COMMAND)
-    return BootstrapResult(True, "detection_failed", command, exit_code if isinstance(exit_code, int) else None, detail)
-
-
-def _command_tuple(value: object, fallback: tuple[str, ...]) -> tuple[str, ...]:
-    if isinstance(value, tuple) and all(isinstance(item, str) for item in value):
-        return value
-    if isinstance(value, list) and all(isinstance(item, str) for item in value):
-        return tuple(value)
-    if isinstance(value, str) and value:
-        return tuple(value.split())
-    return fallback
 
 
 def _bootstrap_dict(result: BootstrapResult) -> dict[str, object]:
@@ -1565,19 +1605,11 @@ def _collision_retry_is_safe(
     )
 
 
-def _git_repository_error_code(error: BaseException) -> str:
+def _git_repository_error_code(error: BaseException) -> ErrorCode:
     text = str(error).lower()
     if "not found" in text or "executable" in text or "start git" in text:
         return "git_unavailable"
     return "repository_unavailable"
 
 
-def _bounded(value: str, limit: int = _DIAGNOSTIC_LIMIT) -> str:
-    if len(value) <= limit:
-        return value
-    if limit <= 1:
-        return value[:limit]
-    return f"{value[: limit - 1]}…"
-
-
-__all__ = ["WorktreeService", "create_worktree"]
+__all__ = ["WorktreeService"]

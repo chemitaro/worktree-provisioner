@@ -21,15 +21,4 @@ class EnvironmentAdapter:
         return os.environ.get(name)
 
 
-# Names kept explicit at the infrastructure boundary for composition roots
-# and callers that use either the operating-system or CLI terminology.
-OsEnvironmentGateway = EnvironmentAdapter
-EnvironmentCliGateway = EnvironmentAdapter
-EnvironmentGateway = EnvironmentAdapter
-
-__all__ = [
-    "EnvironmentAdapter",
-    "EnvironmentCliGateway",
-    "EnvironmentGateway",
-    "OsEnvironmentGateway",
-]
+__all__ = ["EnvironmentAdapter"]

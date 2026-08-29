@@ -28,10 +28,10 @@ language: ja
 ## 2. Authority boundary
 
 - planning baseline: `chemitaro/worktree-provisioner@18c80a1f222a31df0617df5c8193388b3c301e0e`
-- owner decisions: `docs/interview.md` (`status: complete`)
-- current code: create-only prototype
+- owner decisions: `docs/interview.md`（Round 1〜6 complete）
+- current code: four-command implementation with schema v2
 - SpecDock source/tests: provenance と regression scenario の参照元
-- implementation status: 未実装
+- implementation status: implemented candidate; final local/CI/Strict verification remains pending
 
 既存 prototype の module structure と behavior は design authority ではない。特に legacy env lookup、bootstrap failure exit `0`、create-only CLI、generic JSON error、worktree flags を失う parser は置換する。
 
@@ -51,10 +51,16 @@ language: ja
 - locked worktree は force でも不可
 - external inventory observable / external remove forbidden
 - remove eligibility is limited to a single path component directly under the configured managed namespace; nested descendants remain observable and managed-classified but are blocked with `nested_target_unsupported`
+- create is restricted to trusted repositories; Git checkout hooks and clean/smudge/process filters are not suppressed, and `--no-bootstrap` disables Make detection/execution only
+- Make target detection may evaluate or execute repository-controlled behavior and is restricted to trusted repositories
+- detectable identity changes fail closed or return partial; the final non-atomic syscall race is explicitly out of scope
+- current machine JSON contract is schema v2; v1 compatibility mode is not provided
 - namespace symlink は create/remove forbidden
 - macOS/Linux only
 - skill authorization rules、thin wrapper、no task lifecycle mutation
 - no SpecDock migration phase
+
+上記の Round 6 追加判断は `docs/interview.md` の owner answer A として確定している。
 
 ### 3.2 Local implementation choices
 
@@ -108,7 +114,7 @@ application.worktree_service
   v
 presentation
   +-- text renderer
-  +-- JSON schema v1 renderer
+  +-- JSON schema v2 renderer
 
 Codex skill
   +-- SKILL.md: intent, authorization, fact checks, reporting
@@ -149,7 +155,7 @@ worktree-provisioner/
 │       │   └── make_cli.py
 │       └── presentation/
 │           ├── __init__.py
-│           ├── json_v1.py
+│           ├── json_v2.py
 │           └── text.py
 ├── skills/
 │   └── worktree-provisioner/
@@ -167,7 +173,7 @@ worktree-provisioner/
 │   │   ├── test_remove.py
 │   │   ├── test_make_cli.py
 │   │   ├── test_filesystem.py
-│   │   └── test_json_v1.py
+│   │   └── test_json_v2.py
 │   ├── integration/
 │   │   ├── test_cli_create.py
 │   │   ├── test_cli_list_show.py
@@ -261,6 +267,16 @@ class ArtifactState:
 
 `None` は inspection failure / unknown を表す。error handling 中の追加 inspection failure により original error を上書きしない。
 
+### 6.4.1 Path identity
+
+```python
+PathIdentity = tuple[int, int]  # (st_dev, st_ino)
+```
+
+`PathIdentity` は `lstat` 相当の no-follow 観測から得る対象エントリの device / inode である。remove は初期
+観測値を保持し、final refresh 後に同じ target entry であることを比較する。値を取得できない場合は unknown として
+扱い、`path_observation_unavailable` または `path_missing` の blocker により fail-closed にする。
+
 ### 6.5 Record view
 
 ```python
@@ -277,7 +293,7 @@ class WorktreeRecordView:
     lock_reason: str | None
     main: bool
     current: bool
-    path_exists: bool
+    path_exists: bool | None
     record_exists: bool
     managed: bool
     classification_available: bool
@@ -337,13 +353,14 @@ CLI が repo/root を解決して request に渡す設計を推奨する。appli
 ### 6.7 Expected error
 
 ```python
-class WorktreeProvisionerError(RuntimeError):
+class ExpectedError(RuntimeError):
     code: str
     operation: str | None
     message: str
     details: Mapping[str, object]
     result: object | None
     status: Literal["partial", "error"]
+    warnings: tuple[ResultWarning, ...]
 ```
 
 - expected error は code / status / details を構造化する。
@@ -363,7 +380,13 @@ class GitGateway(Protocol):
     def check_branch_ref(self, repo_root: Path, branch: str) -> bool: ...
     def worktree_list(self, repo_root: Path) -> list[GitWorktreeRecord]: ...
     def add_worktree(self, repo_root: Path, *, path: Path, branch: str) -> None: ...
+    def add_worktree_bound(
+        self, repo_root: Path, *, directory: DirectoryCapability, name: str, branch: str
+    ) -> None: ...
     def remove_worktree(self, repo_root: Path, *, path: Path, force: bool) -> None: ...
+    def remove_worktree_bound(
+        self, repo_root: Path, *, directory: DirectoryCapability, name: str, force: bool
+    ) -> None: ...
 ```
 
 Exact argv:
@@ -393,11 +416,28 @@ reference implementation は最初に標準 makefile 名（`GNUmakefile`, `makef
 ### 7.3 FilesystemGateway
 
 ```python
+PathIdentity = tuple[int, int]
+
+
+class DirectoryCapability(Protocol):
+    fd: int
+    path: Path
+
+    def __enter__(self) -> DirectoryCapability: ...
+    def __exit__(self, _type: object, _value: object, _traceback: object) -> None: ...
+    def bind_root(self, root: DirectoryCapability) -> None: ...
+    def is_within_bound_root(self) -> bool: ...
+    def path_identity_matches(self) -> bool: ...
+
+
 class FilesystemGateway(Protocol):
     def lstat_kind(self, path: Path) -> str: ...
     def path_exists_no_follow(self, path: Path) -> bool: ...
+    def path_identity_no_follow(self, path: Path) -> PathIdentity | None: ...
     def ensure_directory(self, path: Path) -> None: ...
     def remove_target_no_follow(self, path: Path) -> None: ...
+    def open_directory(self, path: Path) -> DirectoryCapability: ...
+    def remove_target_no_follow_bound(self, directory: DirectoryCapability, target: Path) -> None: ...
 ```
 
 - symlink / broken symlink / regular file: `unlink`
@@ -438,21 +478,21 @@ Shared behavior:
 ```python
 def main(argv: list[str] | None = None) -> int:
     raw_argv = argv if argv is not None else sys.argv[1:]
-    parser = build_parser(raw_argv)
+    parser = build_parser()
     args = parser.parse_args(raw_argv)
     json_mode = bool(args.json)
     try:
         repo_root = git_gateway.resolve_checkout_root(args.repo)
-        root = resolve_root(args.root, environment_gateway)
+        root = select_root(args.root, environment_gateway)
         result = dispatch(args, repo_root, root, ports)
-    except WorktreeProvisionerError as exc:
+    except ExpectedError as exc:
         return emit_expected(exc, json_mode=json_mode)
     except Exception as exc:
         return emit_internal(exc, operation=infer_operation(args), json_mode=json_mode)
     return emit_ok(result, json_mode=json_mode)
 ```
 
-usage error の JSON 対応には custom `ArgumentParser.error()` または parse wrapper を使用する。`--json` が raw argv に存在する場合は schema v1 error を stdout に一つ出し exit `2`、それ以外は通常 argparse stderr/exit `2` とする。
+usage error の JSON 対応には custom `ArgumentParser.error()` または parse wrapper を使用する。`--json` が raw argv に存在する場合は schema v2 error を stdout に一つ出し exit `2`、それ以外は通常 argparse stderr/exit `2` とする。
 
 ## 9. Root and namespace design
 
@@ -582,7 +622,7 @@ bootstrap failure は worktree creation 自体が確認済みなので、JSON �
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "status": "partial",
   "operation": "create",
   "result": {
@@ -640,6 +680,7 @@ record view の blockers:
 - bare -> `bare_worktree`
 - locked -> `locked_worktree`
 - missing path -> `path_missing`
+- path observation unavailable -> `path_observation_unavailable`
 - managed false + classification available -> `outside_managed_namespace`
 - classification unavailable -> `classification_unavailable`
 - managed path with more than one lexical component below namespace -> `nested_target_unsupported`
@@ -669,20 +710,22 @@ exact id は basename ambiguity より優先する。ambiguous candidatesは ful
 6. refresh Git worktree records
 7. rebuild inventory with same root/namespace
 8. re-resolve original selector
-9. verify canonical path identity unchanged
-10. recalculate blockers; any blocker => stop
-11. recheck protected paths / containment
-12. verify target is a single path component directly below namespace; nested descendant blocker => stop
-13. git worktree remove [--force] <path>
-14. on Git failure: no filesystem cleanup; best-effort read-only inventory refresh and target `lstat` observation may classify partial state
-15. recheck containment
-16. if target remains: target-only no-follow cleanup
-17. cleanup success: ok
-18. cleanup failure: partial, removed_record=true, removed_directory=false
+9. compare initial / refreshed Git facts (canonical path, branch, head, detached/bare/locked flags, lock reason) and target `PathIdentity` (`st_dev`, `st_ino` from no-follow `lstat`)
+10. identity mismatch or unavailable observation => blocker and stop before Git mutation
+11. recalculate blockers; any blocker => stop
+12. recheck protected paths / containment
+13. verify target is a single path component directly below namespace; nested descendant blocker => stop
+14. git worktree remove [--force] <path>
+15. on Git failure: no filesystem cleanup; best-effort read-only inventory refresh and target `lstat` observation may classify partial state
+16. after Git success, observe target `PathIdentity` again; missing target needs no cleanup and is treated as already removed
+17. if the same target entry remains: recheck containment and perform target-only no-follow cleanup
+18. cleanup success: ok
+19. post-Git identity mismatch or cleanup failure: partial, removed_record=true, removed_directory=false
 ```
 
-final refresh / bound check は mutation 前の race reduction である。Git remove 後の namespace / target recheck が
-干渉を検出した場合は cleanup を拡大せず `status=partial` とする。最後の check と Git syscall の間に非協調 process
+final refresh / bound check は mutation 前の race reduction である。Git remove 後の namespace / target recheck または
+`PathIdentity` 比較が干渉を検出した場合は cleanup を拡大せず `status=partial` とする。target が既に missing なら
+cleanup は不要であり、正常な remove 結果として扱う。最後の check と Git syscall の間に非協調 process
 が root / namespace またはその ancestor inode を rename・replace する race は `WTP-THREAT-001` により out of scope
 であり、atomic prevention を主張しない。
 
@@ -695,6 +738,7 @@ final refresh / bound check は mutation 前の race reduction である。Git r
 - `bare_worktree`
 - `locked_worktree`
 - `path_missing`
+- `path_observation_unavailable`
 - `record_missing_after_refresh`
 - `target_changed_after_refresh`
 - `outside_managed_namespace`
@@ -736,7 +780,7 @@ Git record removal後に cleanupが失敗した場合:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "status": "partial",
   "operation": "remove",
   "result": {
@@ -756,7 +800,7 @@ Git record removal後に cleanupが失敗した場合:
 }
 ```
 
-## 14. JSON schema version 1
+## 14. JSON schema version 2
 
 ### 14.1 Common envelope
 
@@ -764,7 +808,7 @@ Git record removal後に cleanupが失敗した場合:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "status": "ok",
   "operation": "list",
   "result": {},
@@ -775,7 +819,7 @@ Git record removal後に cleanupが失敗した場合:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "status": "error",
   "operation": "show",
   "result": null,
@@ -887,7 +931,7 @@ Remove:
 - field removal / rename / type change: schema version update
 - enum semantic change: schema version update
 - error code semantic change: schema version update
-- additive field: v1内で可。consumerはunknown fieldを無視する。
+- additive field: v2内で可。consumerはunknown fieldを無視する。
 - message text: versioned contractではない
 
 ## 15. Text and stream design
@@ -959,15 +1003,18 @@ wrapperはこれ以上のlogicを持たない。
 ```text
 1. classify request intent
 2. if create intent/repository is ambiguous: ask clarification; do not execute
-3. resolve explicit/default repository context and root fact
-4. call wrapper: list --repo ... --root ... --json (fact check)
-5. call wrapper: create [label] --repo ... --root ... [--no-bootstrap] --json
-6. parse schema_version/status
-7. report id, branch, absolute path, bootstrap status
-8. do not create/move Codex task
+3. require a trusted repository context; Git checkout hooks and clean/smudge/process filters are not suppressed
+4. resolve explicit/default repository context and root fact
+5. call wrapper: list --repo ... --root ... --json (fact check)
+6. call wrapper: create [label] --repo ... --root ... [--no-bootstrap] --json
+7. parse schema_version/status (must be `2`; v1 compatibility mode is not provided)
+8. report id, branch, absolute path, bootstrap status
+9. do not create/move Codex task
 ```
 
 `list` fact checkが失敗した場合は createしない。label absentはauto-id decisionなのでclarification要因にしない。
+create の default Make detection / execution は repository-controlled Makefile を評価し得るため、trusted repository
+だけで実行する。`--no-bootstrap` は Make detection / execution のみを無効化し、Git checkout hook / filter は抑止しない。
 
 ### 16.4 Skill remove flow
 
@@ -1039,13 +1086,13 @@ CI matrixはmacOS/Linuxを含める。Windows jobをrequiredにせず、README�
 | `.../infra/git_cli.py` worktree functions/parser | `infra/git_cli.py` | symbol extraction | detached/bare/lockedを保持、removeはsingle forceへ変更 |
 | `.../infra/make_cli.py` | `infra/make_cli.py` | near whole-file extraction | failure exit semanticsはapplication/CLIでpartialへ変更 |
 | `.../infra/fs_cli.py` path/remove helpers | `infra/filesystem.py` | symbol extraction | Workbench copy codeは非対象 |
-| `.../presentation/cli_text.py` worktree renderer | `presentation/{text,json_v1}.py` | contract reference / rewrite | product prefixとschemaを新規設計 |
+| `.../presentation/cli_text.py` worktree renderer | `presentation/{text,json_v2}.py` | contract reference / rewrite | product prefixとschemaを新規設計 |
 | SpecDock `commands/worktree.py` | `cli.py` | argument contract reference | CommandSpec/UseCases frameworkは非採用 |
 | SpecDock `cli/parser.py`, `registry.py`, `bootstrap.py` | none / `cli.py` composition root | rewrite | broad runtimeをcopyしない |
 | SpecDock `tests/cli_runtime/test_worktree.py` scenarios | destination tests | scenario-by-scenario port | parityではなくfunctional/safety regression evidence |
 | current prototype `pyproject.toml` | destination `pyproject.toml` | retain with edits | identity、Python、Hatchling、entrypoint、no deps |
 | current prototype `core.py` | replacement modules | discard after replacement | create-only、legacy env、incomplete parser |
-| current prototype `cli.py` | destination `cli.py` | rewrite | four commands、partial、schema v1 |
+| current prototype `cli.py` | destination `cli.py` | rewrite | four commands、partial、schema v2 |
 | current prototype `tests/test_cli.py` | split test suites | rewrite | legacy env / bootstrap exit 0 assertionsを反転 |
 | current prototype `README.md` | destination `README.md` | rewrite | create-only / legacy env wordingを除去 |
 
@@ -1061,9 +1108,9 @@ CI matrixはmacOS/Linuxを含める。Windows jobをrequiredにせず、README�
 | `INV-006` | unknown Git failureをcollision retryしない。 |
 | `INV-007` | bootstrap failureをrollbackせず、partial/non-zeroで公開する。 |
 | `INV-008` | external/main/current/bare/locked/stale/unsafe targetをforceでも削除しない。 |
-| `INV-009` | removeはfinal refresh後だけmutationする。 |
+| `INV-009` | removeはfinal refresh後だけmutationする。Git facts と no-follow `PathIdentity`（`st_dev`, `st_ino`）の不一致・観測不能は mutation 前に fail-closed とする。 |
 | `INV-010` | Git remove failure後にfilesystem cleanupしない。 |
-| `INV-011` | cleanupはtarget-only、no-followとする。 |
+| `INV-011` | cleanupはtarget-only、no-followとする。Git success後の `PathIdentity` mismatch では cleanup せず partial とし、target missing なら cleanup は不要とする。 |
 | `INV-012` | branch deletion、unlock、prune、repairを副作用にしない。 |
 | `INV-013` | subprocessはargv list、shell falseとする。 |
 | `INV-014` | expected JSONは一文書のみでhuman outputを混ぜない。 |
@@ -1123,6 +1170,6 @@ Rejected。product taskの完全なscope外である。
 | locked remove delegated to Git/double force | application hard blocker。manual unlock required |
 | namespace symlink create未拒否 | create/removeをpreflight reject |
 | create-only scope | 4 command family |
-| generic JSON error | schema v1 typed ok/partial/error |
+| generic JSON error | schema v2 typed ok/partial/error |
 | skill acceptanceが暗黙 | SKILL.md + thin wrapper + authorization testsを必須化 |
 | later SpecDock removal phase | 文書・計画から完全に削除 |

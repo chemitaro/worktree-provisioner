@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -7,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from worktree_provisioner.application.contracts import GitWorktreeRecord
+from worktree_provisioner.application.contracts import ExpectedError, GitWorktreeRecord
 from worktree_provisioner.application.ports import GitGateway
 from worktree_provisioner.infra.git_cli import (
     GitAdapterError,
@@ -16,36 +17,32 @@ from worktree_provisioner.infra.git_cli import (
     _validated_relative_name,
     parse_worktree_porcelain,
 )
+from worktree_provisioner.presentation.json_v2 import dumps, error_document
 
 
 def test_parse_main_and_linked_records_preserves_porcelain_flags() -> None:
-    output = """\
-worktree /repo
-HEAD 1111111111111111111111111111111111111111
-branch refs/heads/main
-
-worktree /worktrees/feature
-HEAD 2222222222222222222222222222222222222222
-branch refs/heads/feature
-
-worktree /worktrees/detached
-HEAD 3333333333333333333333333333333333333333
-detached
-
-worktree /repo.git
-HEAD 4444444444444444444444444444444444444444
-bare
-
-worktree /worktrees/locked
-HEAD 5555555555555555555555555555555555555555
-branch refs/heads/locked
-locked
-
-worktree /worktrees/locked-with-reason
-HEAD 6666666666666666666666666666666666666666
-branch refs/heads/locked-reason
-locked maintenance window
-""".rstrip()
+    output = (
+        b"worktree /repo\0"
+        b"HEAD 1111111111111111111111111111111111111111\0"
+        b"branch refs/heads/main\0\0"
+        b"worktree /worktrees/feature\0"
+        b"HEAD 2222222222222222222222222222222222222222\0"
+        b"branch refs/heads/feature\0\0"
+        b"worktree /worktrees/detached\0"
+        b"HEAD 3333333333333333333333333333333333333333\0"
+        b"detached\0\0"
+        b"worktree /repo.git\0"
+        b"HEAD 4444444444444444444444444444444444444444\0"
+        b"bare\0\0"
+        b"worktree /worktrees/locked\0"
+        b"HEAD 5555555555555555555555555555555555555555\0"
+        b"branch refs/heads/locked\0"
+        b"locked\0\0"
+        b"worktree /worktrees/locked-with-reason\0"
+        b"HEAD 6666666666666666666666666666666666666666\0"
+        b"branch refs/heads/locked-reason\0"
+        b"locked maintenance window\0"
+    )
 
     records = parse_worktree_porcelain(output)
 
@@ -90,7 +87,7 @@ locked maintenance window
 
 
 def test_parser_does_not_depend_on_final_blank_line() -> None:
-    records = parse_worktree_porcelain("worktree /repo\nHEAD abc\nbranch refs/heads/main\n")
+    records = parse_worktree_porcelain(b"worktree /repo\0HEAD abc\0branch refs/heads/main\0")
 
     assert records == [GitWorktreeRecord(path=Path("/repo"), head="abc", branch="main")]
 
@@ -136,9 +133,9 @@ def test_nul_parser_restores_mixed_utf8_and_raw_bytes_under_ascii_fsdecode(
     assert records[0].branch == "機能"
 
 
-@pytest.mark.parametrize("text", ["", "garbage\n", "HEAD abc\nbranch refs/heads/main\n"])
-def test_parser_returns_no_fabricated_record_for_empty_or_malformed_output(text: str) -> None:
-    assert parse_worktree_porcelain(text) == []
+@pytest.mark.parametrize("data", [b"", b"garbage\0", b"HEAD abc\0branch refs/heads/main\0"])
+def test_parser_returns_no_fabricated_record_for_empty_or_malformed_output(data: bytes) -> None:
+    assert parse_worktree_porcelain(data) == []
 
 
 def test_git_gateway_conforms_to_protocol() -> None:
@@ -206,7 +203,7 @@ def test_git_gateway_uses_exact_argv_and_preserves_paths(tmp_path: Path, monkeyp
         stdout = {
             ("rev-parse", "--show-toplevel"): f"{repo.resolve()}\n",
             ("rev-parse", "--abbrev-ref", "HEAD"): "main\n",
-            ("worktree", "list", "--porcelain", "-z"): "worktree /repo\nHEAD abc\nbranch refs/heads/main\n",
+            ("worktree", "list", "--porcelain", "-z"): b"worktree /repo\0HEAD abc\0branch refs/heads/main\0\0",
         }.get(command, "")
         return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
 
@@ -499,6 +496,51 @@ def test_add_worktree_exposes_only_operation_specific_collision_kind(
         GitCliGateway().add_worktree(repo, path=target, branch="feature")
 
     assert caught.value.collision_kind == expected
+
+
+def test_git_failure_redacts_secrets_from_adapter_and_public_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    secrets = (
+        "top-secret-token",
+        "top-secret-password",
+        "top-secret-bearer",
+    )
+    stderr = (
+        "fatal: a branch named 'feature' already exists\n"
+        "TOKEN=top-secret-token PASSWORD=top-secret-password\n"
+        "Authorization: Bearer top-secret-bearer\n"
+    )
+
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 128, stdout="", stderr=stderr)
+
+    monkeypatch.setattr("worktree_provisioner.infra.git_cli.shutil.which", lambda _: "/usr/bin/git")
+    monkeypatch.setattr("worktree_provisioner.infra.git_cli.subprocess.run", fake_run)
+
+    with pytest.raises(GitAdapterError) as caught:
+        GitCliGateway().add_worktree(repo, path=tmp_path / "target", branch="feature")
+
+    error = caught.value
+    assert error.collision_kind == "branch"
+    public = error_document(
+        ExpectedError(
+            code="git_worktree_add_failed",
+            operation="create",
+            message="git worktree add failed",
+            details={"diagnostic": str(error)},
+            result=None,
+            status="error",
+        )
+    )
+    public_json = dumps(public)
+
+    for secret in secrets:
+        assert secret not in error.diagnostic
+        assert secret not in str(error)
+        assert secret not in json.loads(public_json)["error"]["details"]["diagnostic"]
 
 
 def test_branch_checks_return_false_for_expected_negative_status(

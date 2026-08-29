@@ -10,7 +10,7 @@ Git linked worktree を管理するための model-invoked skill です。実際
 ## 実行境界
 
 - 自動実行は、この skill ディレクトリを基準にした `./scripts/worktree-provisioner` を使う。CLI は PATH 上の installed `worktree-provisioner` に委ねられる。
-- 自動実行では、すべての呼び出しに `--json` を付ける。JSON envelope の `schema_version`、`status`、`operation`、`result`、`error.code` を確認し、text output の解析で判断しない。
+- 自動実行では、すべての呼び出しに `--json` を付ける。JSON envelope の `schema_version=2`、`status`、`operation`、`result`、`error.code` を確認し、text output の解析で判断しない。active machine contract に schema v1 互換はありません。
 - `status=ok` / exit `0` は完了、`status=partial` / exit `1` は成果物を保持した部分完了、`status=error` / exit `1` は失敗、usage error / exit `2` は入力修正が必要、と扱う。partial は成功として報告しない。
 - wrapper が exit `127` を返した場合は、CLI が installed でないか PATH 上にない installation problem と報告する。
 - Codex task の作成・移動、current task の変更、SpecDock lifecycle、GitHub/remote 操作はこの skill の仕事ではない。
@@ -31,7 +31,7 @@ race に対する destructive scope の絶対保証を主張しません。skill
 ## 事前確認
 
 1. 依頼が create/list/show/remove のどれかを分類する。
-2. create では create intent、対象 repository、managed root、実行による副作用が明確かを確認する。曖昧なら質問して停止し、wrapper を実行しない。label 省略だけは owner-approved auto-id のため質問しない。
+2. create では create intent、対象 repository、managed root、実行による副作用が明確かを確認し、対象が trusted repository であることを利用者に確認する。曖昧なら質問して停止し、wrapper を実行しない。label 省略だけは owner-approved auto-id のため質問しない。Git checkout hook/filter は抑止されず、Makefile の検出・実行も repository 管理下の挙動を評価・実行し得るため、`--no-bootstrap` を指定しても Git side effect は残る。
 3. remove では削除対象が明示された単一 target かを確認する。曖昧な basename、外部 target、protected target は停止する。
    managed namespace の nested descendant は list/show で観測できますが、`nested_target_unsupported` blocker のため
    removable ではありません。`--force` でも解除しません。
@@ -56,6 +56,9 @@ race に対する destructive scope の絶対保証を主張しません。skill
    ./scripts/worktree-provisioner create [label] --repo <repo> --root <root> [--no-bootstrap] --json
    ```
 
+   `--no-bootstrap` は Make の検出・実行だけを無効にする。Git checkout hook/filter は抑止されず、Make detection が repository
+   管理下の挙動を評価・実行し得ることを利用者が理解した trusted repository に限って実行する。
+
 3. `status` を解釈し、成功なら `result.id`、`result.branch`、`result.worktree_path` の絶対パス、`result.bootstrap.status` を報告する。
    成功・partial・error のいずれでも envelope の `warnings` を必ず確認する。`collision_partial_artifact` があれば warning の
    `message` は解析せず、`facts.candidate_id`、`facts.branch`、`facts.path`、各 `*_exists` を機械的に報告する。partial なら
@@ -67,7 +70,7 @@ race に対する destructive scope の絶対保証を主張しません。skill
 ## List / Show
 
 - 利用者が要求した read-only operation を wrapper 経由で JSON で一度実行する。
-- `schema_version=1` と `status` を確認し、`status=ok` なら `result` を報告する。`error.code` と exit code がある場合はそのまま原因を報告する。
+- `schema_version=2` と `status` を確認し、`status=ok` なら `result` を報告する。`error.code` と exit code がある場合はそのまま原因を報告する。
   `warnings` は常に確認し、`collision_partial_artifact` の stable code と typed `facts` を報告する。warning message の文言には依存しない。
 - JSON envelope を人間向け text と混ぜず、CLI の schema や target resolution を skill 側で再実装しない。
 

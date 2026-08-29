@@ -67,7 +67,7 @@
     {
       "id": "P1-S07",
       "name": "show_resolves_or_reports_ambiguity",
-      "test": "tests/integration/test_cli_contracts.py::test_show_reports_ambiguous_basename_with_candidates",
+      "test": "tests/integration/test_cli_contracts.py::test_show_prefers_exact_stable_id_before_basename_ambiguity",
       "requirements": ["WTP-RQ-011", "WTP-RQ-015", "WTP-RQ-017"],
       "acceptance_criteria": ["WTP-AC-009", "WTP-AC-013"],
       "reference_symbols": ["UC-005", "WTP-RQ-011"],
@@ -116,7 +116,7 @@
       "requirements": ["WTP-RQ-014", "WTP-RQ-015", "WTP-RQ-016"],
       "acceptance_criteria": ["WTP-AC-013", "WTP-AC-014"],
       "reference_symbols": ["OD-002", "OD-003", "INV-014"],
-      "intentional_changes": ["replace generic JSON with schema version 1 and typed nullability"]
+      "intentional_changes": ["replace generic JSON with schema version 2 and typed nullability"]
     },
     {
       "id": "P1-S13",
@@ -153,6 +153,33 @@
       "acceptance_criteria": ["WTP-AC-005", "WTP-AC-010", "WTP-AC-012"],
       "reference_symbols": ["WTP-THREAT-001", "INV-004", "INV-005", "INV-009", "INV-010", "INV-011", "INV-019"],
       "intentional_changes": ["document descriptor/recheck race reduction without claiming atomic prevention against non-cooperating ancestor rename"]
+    },
+    {
+      "id": "P1-S17",
+      "name": "skill_create_fact_gate_and_partial_artifacts",
+      "test": "tests/integration/test_skill_wrapper.py::test_skill_create_requires_fact_gate_and_reports_partial_artifacts",
+      "requirements": ["WTP-RQ-018"],
+      "acceptance_criteria": ["WTP-AC-015"],
+      "reference_symbols": ["OD-015", "OD-018"],
+      "intentional_changes": ["trace skill create fact-gate, result reporting, and retained partial artifacts to the acceptance test"]
+    },
+    {
+      "id": "P1-S18",
+      "name": "distribution_contract_is_pinned",
+      "test": "tests/unit/test_distribution_contract.py::test_distribution_contract_is_pinned_in_project_and_ci_metadata",
+      "requirements": ["WTP-RQ-019", "WTP-RQ-020"],
+      "acceptance_criteria": ["WTP-AC-018"],
+      "reference_symbols": ["OD-010", "WTP-RQ-019", "WTP-RQ-020"],
+      "intentional_changes": ["trace package identity, supported platforms, matrix checks, and installed-wheel smoke to repository metadata"]
+    },
+    {
+      "id": "P1-S19",
+      "name": "remove_refresh_rechecks_target_entry_identity",
+      "test": "tests/unit/test_remove.py::test_refresh_target_identity_change_is_blocked_before_git_remove",
+      "requirements": ["WTP-RQ-012", "WTP-RQ-013", "WTP-NFR-001"],
+      "acceptance_criteria": ["WTP-AC-012"],
+      "reference_symbols": ["WTP-NFR-001", "INV-009", "INV-011", "WTP-AC-012"],
+      "intentional_changes": ["trace no-follow device/inode identity and refreshed Git facts to fail-closed remove behavior"]
     }
   ],
   "acceptance_criteria_mapping": {
@@ -167,13 +194,13 @@
     "WTP-AC-009": ["P1-S07"],
     "WTP-AC-010": ["P1-S08", "P1-S11", "P1-S16"],
     "WTP-AC-011": ["P1-S09", "P1-S10"],
-    "WTP-AC-012": ["P1-S09", "P1-S16"],
+    "WTP-AC-012": ["P1-S09", "P1-S16", "P1-S19"],
     "WTP-AC-013": ["P1-S07", "P1-S12"],
     "WTP-AC-014": ["P1-S12"],
-    "WTP-AC-015": ["P1-S14"],
+    "WTP-AC-015": ["P1-S17"],
     "WTP-AC-016": ["P1-S10", "P1-S14"],
     "WTP-AC-017": ["P1-S13"],
-    "WTP-AC-018": ["P1-S01"],
+    "WTP-AC-018": ["P1-S18"],
     "WTP-AC-019": ["P1-S01", "P1-S02", "P1-S05"],
     "WTP-AC-020": ["P1-S15"]
   }

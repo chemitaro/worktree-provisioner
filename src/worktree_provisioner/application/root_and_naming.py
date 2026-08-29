@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
+from worktree_provisioner.application.contracts import ErrorCode
 from worktree_provisioner.application.ports import EnvironmentGateway, FilesystemGateway
 
 ROOT_ENVIRONMENT: Final[str] = "WORKTREE_PROVISIONER_ROOT"
@@ -26,10 +27,10 @@ class RootResolutionError(ValueError):
 
     __slots__ = ("code", "details")
 
-    code: str
+    code: ErrorCode
     details: dict[str, object]
 
-    def __init__(self, *, code: str, message: str, details: dict[str, object] | None = None) -> None:
+    def __init__(self, *, code: ErrorCode, message: str, details: dict[str, object] | None = None) -> None:
         super().__init__(message)
         self.code = code
         self.details = details or {}
@@ -265,12 +266,7 @@ __all__ = [
     "is_retryable_git_collision",
     "make_candidate",
     "normalize_label",
-    "resolve_root",
     "select_root",
     "validate_namespace",
     "validate_root",
 ]
-
-# Descriptive aliases keep the policy helpers discoverable for composition
-# roots that call the operation ``resolve`` rather than ``select``.
-resolve_root = select_root

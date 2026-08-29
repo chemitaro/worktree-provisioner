@@ -15,7 +15,7 @@ def test_json_usage_error_is_one_stdout_document_with_exit_two(
     assert result.returncode == 2
     assert result.stderr == ""
     assert set(payload) == {"schema_version", "status", "operation", "result", "error", "warnings"}
-    assert payload["schema_version"] == 1
+    assert payload["schema_version"] == 2
     assert payload["status"] == "error"
     assert payload["operation"] == "show"
     assert payload["result"] is None

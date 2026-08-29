@@ -22,14 +22,15 @@ language: ja
 - repository: `chemitaro/worktree-provisioner`
 - branch: `main`
 - verified SHA: `18c80a1f222a31df0617df5c8193388b3c301e0e`
-- owner decisions: `docs/interview.md` complete
-- current implementation: create-only prototype
+- owner decisions: `docs/interview.md` Round 1〜6 complete
+- current implementation: four-command implementation with schema v2
 
 本計画は SpecDock repository の変更を一切含まない。SpecDock CLI の shim、deprecation、削除、migration、docs/tests更新を行う phase は設けない。
 
 ## 2. Non-negotiable implementation constraints
 
-実装者は次を再決定しない。
+実装者は次を再決定しない。nested descendant の直下限定、Git hook/filter、Make detection trust、final syscall
+race、JSON schema major は `docs/interview.md` Round 6 の owner answer A として確定している。
 
 - `create` / `list` / `show` / `remove` を初期版で同時に完成する。
 - `SPEC_DOCK_WORKTREE_ROOT` を読まない。
@@ -59,7 +60,7 @@ P0  authority and baseline guard
   -> P4  create and bootstrap partial semantics
   -> P5  list/show inventory and target resolver
   -> P6  managed-only remove and cleanup
-  -> P7  CLI, text, JSON schema v1
+  -> P7  CLI, text, JSON schema v2
   -> P8  Codex skill and thin wrapper
   -> P9  docs, packaging, installation, CI
   -> P10 full verification and handoff
@@ -639,7 +640,7 @@ uv run pytest tests/unit/test_remove.py tests/unit/test_filesystem.py \
 
 `WTP-AC-010`〜`WTP-AC-012`がpass。
 
-## 11. P7 — CLI, text, and JSON schema v1
+## 11. P7 — CLI, text, and JSON schema v2
 
 ### 11.1 Parser/dispatch
 
@@ -659,7 +660,7 @@ Tests:
 
 - common fields always present
 - ok/partial/error nullability
-- schema version integer 1
+- schema version integer 2; v1 compatibility mode is not provided
 - operation enum
 - path absolute string
 - booleans typed
@@ -694,7 +695,7 @@ P4-P7 test pass後にのみ次を行う。
 ### 11.6 Verification
 
 ```bash
-uv run pytest tests/unit/test_json_v1.py tests/integration -q
+uv run pytest tests/unit/test_json_v2.py tests/integration -q
 uv run worktree-provisioner --help
 uv run worktree-provisioner create --help
 uv run worktree-provisioner list --help
@@ -939,14 +940,14 @@ Repositoryは既にpublicであるが、次は別の明示authorityを必要と�
 | `infra/git_cli.py` | P3 | P6 remove argv review | no remote/GitHub functions |
 | `infra/make_cli.py` | P3 | P4 bootstrap fixes | no rollback policy |
 | `infra/filesystem.py` | P3 | P6 cleanup fixes | no Workbench logic |
-| `presentation/json_v1.py` | P7 | schema review only | explicit mapping |
+| `presentation/json_v2.py` | P7 | schema review only | explicit mapping |
 | `presentation/text.py` | P7 | P9 help/docs consistency | wording not machine contract |
 | `skills/.../SKILL.md` | P8 skill | P9 docs consistency | authorization boundary |
 | `skills/.../scripts/worktree-provisioner` | P8 wrapper | none except portability | thin exec only |
 | `tests/unit/test_create.py` | P4 | P10 hardening | partial semantics |
 | `tests/unit/test_inventory.py` | P5 | P10 | external observable |
 | `tests/unit/test_remove.py` | P6 | P10 | destructive safety |
-| `tests/unit/test_json_v1.py` | P7 | schema change review | field/type lock |
+| `tests/unit/test_json_v2.py` | P7 | schema change review | field/type lock |
 | `tests/integration/test_skill_wrapper.py` | P8 | P10 | argv/auth flows |
 | `README.md` | P9 | P10 corrections | no stale prototype text |
 | `.github/workflows/ci.yml` | P9 | P10 | macOS/Linux |
@@ -1011,7 +1012,7 @@ Repositoryは既にpublicであるが、次は別の明示authorityを必要と�
 | `WTP-RQ-012` remove eligibility | Design §12.3, §13.1-13.2 | P5, P6 | blocker × force matrix, external and unsafe namespace tests |
 | `WTP-RQ-013` remove execution | Design §13.1, §13.3-13.5 | P6 | default/single-force argv, refresh, Git-first, cleanup partial |
 | `WTP-RQ-014` human text | Design §15 | P7 | default mode, streams, prefix, absolute path, partial text |
-| `WTP-RQ-015` JSON | Design §14 | P7 | schema-v1 ok/partial/error, one-document and type tests |
+| `WTP-RQ-015` JSON | Design §14 | P7 | schema-v2 ok/partial/error, one-document and type tests |
 | `WTP-RQ-016` exit codes | Design §11, §13.5, §15 | P4, P6, P7 | exit 0/1/2 matrix |
 | `WTP-RQ-017` codes/blockers | Design §6.7, §12.3, §14.5 | P4-P7 | at least one contract test per code/blocker |
 | `WTP-RQ-018` skill/wrapper | Design §16 | P8 | intent, authorization, wrapper thinness and propagation tests |
@@ -1097,7 +1098,7 @@ Installed wheel smokeとskill wrapper fake-PATH testを追加する。
 次の全てを満たすこと。
 
 1. 4 commandsがstandalone installed CLIとして動く。
-2. default textとexplicit schema v1 JSONが一致した状態を表す。
+2. default textとexplicit schema v2 JSONが一致した状態を表す。
 3. rootは`--root`/new envのみで、legacy envを受理しない。
 4. create naming/collision/linked normalizationがpassする。
 5. bootstrap failureはretained + partial + exit1 + no rollbackである。

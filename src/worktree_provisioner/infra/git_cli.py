@@ -18,10 +18,12 @@ from pathlib import Path
 from typing import Final, Literal, overload
 
 from worktree_provisioner.application.contracts import CollisionKind, GitWorktreeRecord
+from worktree_provisioner.application.ports import DirectoryCapability
+from worktree_provisioner.diagnostics import DIAGNOSTIC_LIMIT, safe_bounded
+from worktree_provisioner.diagnostics import bounded as _bounded
 from worktree_provisioner.encoding import filesystem_argument, restore_utf8_surrogates
 
 _GIT_COMMAND: Final[str] = "git"
-_DIAGNOSTIC_LIMIT: Final[int] = 4096
 _HEAD = "HEAD"
 _BRANCH_REF_PREFIX = "refs/heads/"
 _GIT_AUTHORITY_ENVIRONMENT = frozenset(
@@ -89,18 +91,11 @@ class GitAdapterError(RuntimeError):
         self.operation = operation
         self.argv = tuple(argv)
         self.returncode = returncode
-        self.diagnostic = _bounded(diagnostic)
+        self.diagnostic = safe_bounded(diagnostic)
         self.collision_kind = collision_kind
         detail = self.diagnostic
         text = f"{message}: {detail}" if detail else message
         super().__init__(text)
-
-
-# These aliases make the boundary explicit to callers that distinguish a
-# command failure from the concrete adapter implementation.  They remain the
-# same exception type and do not create a second error contract.
-GitCommandError = GitAdapterError
-InternalGitAdapterError = GitAdapterError
 
 
 @dataclass(frozen=True, slots=True)
@@ -240,7 +235,7 @@ class GitCliGateway:
             collision_kind=_classify_add_collision(diagnostic, branch=branch_name, path=target),
         )
 
-    def add_worktree_bound(self, repo_root: Path, *, directory: object, name: str, branch: str) -> None:
+    def add_worktree_bound(self, repo_root: Path, *, directory: DirectoryCapability, name: str, branch: str) -> None:
         """Add a worktree relative to an already-open namespace directory.
 
         ``directory`` is the descriptor capability supplied by the no-follow
@@ -251,16 +246,14 @@ class GitCliGateway:
         """
 
         repo = _validated_path(repo_root, name="repository root")
-        fd = getattr(directory, "fd", None)
-        directory_path = getattr(directory, "path", None)
-        if not isinstance(fd, int) or fd < 0 or not isinstance(directory_path, Path):
+        fd = directory.fd
+        if fd < 0:
             raise GitAdapterError(
                 operation="add_worktree_bound",
                 argv=(),
                 message="worktree namespace capability is invalid",
             )
-        within_root = getattr(directory, "is_within_bound_root", None)
-        if callable(within_root) and not within_root():
+        if not directory.is_within_bound_root():
             raise GitAdapterError(
                 operation="add_worktree_bound",
                 argv=(),
@@ -270,7 +263,7 @@ class GitCliGateway:
         branch_name = _validated_branch(branch)
         common_git_dir = self._common_git_dir(repo)
         start_point = self._head_commit(repo)
-        if callable(within_root) and not within_root():
+        if not directory.is_within_bound_root():
             raise GitAdapterError(
                 operation="add_worktree_bound",
                 argv=(),
@@ -295,8 +288,7 @@ class GitCliGateway:
             cwd_fd=fd,
         )
         if completed.returncode == 0:
-            identity_matches = getattr(directory, "path_identity_matches", None)
-            if callable(identity_matches) and not identity_matches():
+            if not directory.path_identity_matches():
                 raise GitAdapterError(
                     operation="add_worktree_bound",
                     argv=self._argv(args),
@@ -374,26 +366,24 @@ class GitCliGateway:
         )
         self._run(repo, args, operation="remove_worktree")
 
-    def remove_worktree_bound(self, repo_root: Path, *, directory: object, name: str, force: bool) -> None:
+    def remove_worktree_bound(self, repo_root: Path, *, directory: DirectoryCapability, name: str, force: bool) -> None:
         """Remove a worktree using a root-bound parent directory fd."""
 
         repo = _validated_path(repo_root, name="repository root")
-        fd = getattr(directory, "fd", None)
-        if not isinstance(fd, int) or fd < 0:
+        fd = directory.fd
+        if fd < 0:
             raise GitAdapterError(
                 operation="remove_worktree_bound",
                 argv=(),
                 message="worktree namespace capability is invalid",
             )
-        within_root = getattr(directory, "is_within_bound_root", None)
-        identity_matches = getattr(directory, "path_identity_matches", None)
-        if callable(within_root) and not within_root():
+        if not directory.is_within_bound_root():
             raise GitAdapterError(
                 operation="remove_worktree_bound",
                 argv=(),
                 message="worktree namespace is outside the managed root",
             )
-        if callable(identity_matches) and not identity_matches():
+        if not directory.path_identity_matches():
             raise GitAdapterError(
                 operation="remove_worktree_bound",
                 argv=(),
@@ -401,13 +391,13 @@ class GitCliGateway:
             )
         target_name = _validated_basename(name)
         common_git_dir = self._common_git_dir(repo)
-        if callable(within_root) and not within_root():
+        if not directory.is_within_bound_root():
             raise GitAdapterError(
                 operation="remove_worktree_bound",
                 argv=(),
                 message="worktree namespace is outside the managed root",
             )
-        if callable(identity_matches) and not identity_matches():
+        if not directory.path_identity_matches():
             raise GitAdapterError(
                 operation="remove_worktree_bound",
                 argv=(),
@@ -541,73 +531,12 @@ class GitCliGateway:
         return completed
 
 
-def parse_worktree_porcelain(output: str | bytes) -> list[GitWorktreeRecord]:
-    """Parse text or NUL-delimited Git worktree porcelain output.
+def parse_worktree_porcelain(data: bytes) -> list[GitWorktreeRecord]:
+    """Parse Git's NUL-delimited porcelain fields without trimming values."""
 
-    The adapter uses Git's ``--porcelain -z`` form so path bytes are never
-    confused with line or record delimiters.  The text form remains accepted
-    for callers and historical fixtures that use the older newline protocol.
-    """
-
-    if isinstance(output, bytes):
-        return _parse_worktree_porcelain_z(output)
-    return _parse_worktree_porcelain_text(output)
-
-
-def _parse_worktree_porcelain_text(text: str) -> list[GitWorktreeRecord]:
-    """Parse the legacy line-delimited form without fabricating records."""
-
-    records: list[GitWorktreeRecord] = []
-    block: dict[str, object] = {}
-
-    def flush() -> None:
-        path = block.get("path")
-        if not isinstance(path, str) or not path:
-            return
-        branch = block.get("branch")
-        normalized_branch = restore_utf8_surrogates(branch) if isinstance(branch, str) and branch else None
-        if normalized_branch is not None and normalized_branch.startswith(_BRANCH_REF_PREFIX):
-            normalized_branch = normalized_branch[len(_BRANCH_REF_PREFIX) :]
-            if not normalized_branch:
-                normalized_branch = None
-        lock_reason = _optional_text(block.get("lock_reason"))
-        records.append(
-            GitWorktreeRecord(
-                path=Path(path),
-                head=_optional_text(block.get("head")),
-                branch=normalized_branch,
-                detached=bool(block.get("detached", False)),
-                bare=bool(block.get("bare", False)),
-                locked=bool(block.get("locked", False)),
-                lock_reason=restore_utf8_surrogates(lock_reason) if lock_reason is not None else None,
-            )
-        )
-
-    for raw_line in text.splitlines():
-        line = raw_line.rstrip("\r")
-        if not line.strip():
-            flush()
-            block = {}
-            continue
-        if line.startswith("worktree "):
-            flush()
-            block = {"path": line[len("worktree ") :]}
-        elif line.startswith("HEAD "):
-            block["head"] = line[len("HEAD ") :].strip() or None
-        elif line.startswith("branch "):
-            block["branch"] = line[len("branch ") :].strip() or None
-        elif line == "detached":
-            block["detached"] = True
-        elif line == "bare":
-            block["bare"] = True
-        elif line == "locked" or line.startswith("locked "):
-            block["locked"] = True
-            reason = line[len("locked") :].strip()
-            block["lock_reason"] = reason or None
-        # ``prunable`` and future Git metadata are deliberately ignored.
-
-    flush()
-    return records
+    if not isinstance(data, bytes):
+        raise TypeError("worktree porcelain output must be bytes from the -z protocol")
+    return _parse_worktree_porcelain_z(data)
 
 
 def _parse_worktree_porcelain_z(data: bytes) -> list[GitWorktreeRecord]:
@@ -764,10 +693,6 @@ def _first_line(value: str | None) -> str | None:
     return line or None
 
 
-def _optional_text(value: object) -> str | None:
-    return value if isinstance(value, str) and value else None
-
-
 def _classify_add_collision(
     diagnostic: str,
     *,
@@ -831,12 +756,12 @@ def _diagnostic(stdout: str | None, stderr: str | None) -> str:
         name = present[0]
         value = values[name]
         assert value is not None
-        return f"{name}: {_bounded(value, limit=_DIAGNOSTIC_LIMIT - len(name) - 2)}"
+        return f"{name}: {_bounded(value, limit=DIAGNOSTIC_LIMIT - len(name) - 2)}"
 
     # Keep both streams visible even when either one is very large.  This is
     # useful for Git diagnostics where stderr may only say "see stdout".
     label_budget = len("stderr: ") + len("stdout: ") + 1
-    content_budget = max(0, _DIAGNOSTIC_LIMIT - label_budget)
+    content_budget = max(0, DIAGNOSTIC_LIMIT - label_budget)
     first_budget = content_budget // 2
     second_budget = content_budget - first_budget
     stderr_value = values["stderr"]
@@ -870,23 +795,8 @@ def _boolean_command_result(
     )
 
 
-def _bounded(value: str, *, limit: int = _DIAGNOSTIC_LIMIT) -> str:
-    if len(value) <= limit:
-        return value
-    suffix = "...[truncated]"
-    return value[: max(0, limit - len(suffix))] + suffix
-
-
 __all__ = [
     "GitAdapterError",
-    "GitCLIGateway",
     "GitCliGateway",
-    "GitCommandError",
-    "InternalGitAdapterError",
     "parse_worktree_porcelain",
 ]
-
-
-# Accommodate the conventional initialism spelling without duplicating the
-# implementation or creating a second runtime type.
-GitCLIGateway = GitCliGateway

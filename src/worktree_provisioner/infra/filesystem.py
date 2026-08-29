@@ -10,6 +10,8 @@ import stat
 from dataclasses import dataclass
 from pathlib import Path
 
+from worktree_provisioner.application.ports import DirectoryCapability, PathIdentity
+
 
 class FilesystemAdapterError(RuntimeError):
     """Typed failure for an unsafe or failed filesystem operation."""
@@ -25,10 +27,6 @@ class FilesystemAdapterError(RuntimeError):
         self.path = path
         self.kind = kind
         super().__init__(message)
-
-
-FilesystemError = FilesystemAdapterError
-FilesystemGatewayError = FilesystemAdapterError
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +45,18 @@ class FilesystemCliGateway:
 
     def path_exists_no_follow(self, path: Path) -> bool:
         return self.lstat_kind(path) != "missing"
+
+    def path_identity_no_follow(self, path: Path) -> PathIdentity | None:
+        """Return the no-follow device/inode identity for an entry."""
+
+        target = _validated_path(path)
+        try:
+            info = target.lstat()
+        except FileNotFoundError:
+            return None
+        except (PermissionError, OSError) as exc:
+            raise _wrapped_error("path_identity_no_follow", target, exc) from exc
+        return (int(info.st_dev), int(info.st_ino))
 
     def ensure_directory(self, path: Path) -> None:
         target = _validated_path(path)
@@ -123,7 +133,7 @@ class FilesystemCliGateway:
             raise _wrapped_error("open_directory", target, exc) from exc
         return DirectoryHandle(fd=fd, path=opened_path)
 
-    def remove_target_no_follow_bound(self, directory: DirectoryHandle, target: Path) -> None:
+    def remove_target_no_follow_bound(self, directory: DirectoryCapability, target: Path) -> None:
         """Remove ``target`` beneath an already-open directory descriptor."""
 
         target_path = _validated_path(target)
@@ -181,7 +191,7 @@ class DirectoryHandle:
 
     fd: int
     path: Path
-    root: DirectoryHandle | None = None
+    root: DirectoryCapability | None = None
 
     def __enter__(self) -> DirectoryHandle:
         return self
@@ -207,7 +217,7 @@ class DirectoryHandle:
             return False
         return (current.st_dev, current.st_ino) == (opened.st_dev, opened.st_ino)
 
-    def bind_root(self, root: DirectoryHandle) -> None:
+    def bind_root(self, root: DirectoryCapability) -> None:
         """Attach the opened managed root used to constrain mutations."""
 
         self.root = root
@@ -226,10 +236,6 @@ class DirectoryHandle:
         if root_path != self.root.path.absolute():
             return False
         return namespace_path != root_path and root_path in namespace_path.parents
-
-
-FilesystemGateway = FilesystemCliGateway
-FilesystemAdapter = FilesystemCliGateway
 
 
 def _validated_path(path: Path) -> Path:
@@ -381,10 +387,6 @@ def _wrapped_error(operation: str, path: Path, exc: OSError, *, kind: str | None
 
 __all__ = [
     "DirectoryHandle",
-    "FilesystemAdapter",
     "FilesystemAdapterError",
     "FilesystemCliGateway",
-    "FilesystemError",
-    "FilesystemGateway",
-    "FilesystemGatewayError",
 ]

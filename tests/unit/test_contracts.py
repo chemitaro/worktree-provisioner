@@ -24,16 +24,14 @@ from worktree_provisioner.application.contracts import (
     ShowRequest,
     ShowResult,
     WorktreeOrigin,
-    WorktreeProvisionerError,
     WorktreeRecordView,
 )
 from worktree_provisioner.application.ports import (
-    ApplicationPorts,
     BootstrapGateway,
+    DirectoryCapability,
     EnvironmentGateway,
     FilesystemGateway,
     GitGateway,
-    Ports,
 )
 
 
@@ -211,7 +209,7 @@ def test_result_objects_keep_paths_and_immutable_sequences() -> None:
     assert removed.branch_deleted is False
 
 
-def test_expected_error_is_structured_and_alias_is_exact() -> None:
+def test_expected_error_is_structured() -> None:
     result = ListResult(())
     error = ExpectedError(
         code="target_not_found",
@@ -223,7 +221,6 @@ def test_expected_error_is_structured_and_alias_is_exact() -> None:
     )
 
     assert isinstance(error, RuntimeError)
-    assert WorktreeProvisionerError is ExpectedError
     assert str(error) == error.message
     assert error.code == "target_not_found"
     assert error.operation == "show"
@@ -235,6 +232,7 @@ def test_expected_error_is_structured_and_alias_is_exact() -> None:
 def test_ports_are_runtime_protocols_with_narrow_surface() -> None:
     assert getattr(GitGateway, "_is_protocol", False)
     assert getattr(BootstrapGateway, "_is_protocol", False)
+    assert getattr(DirectoryCapability, "_is_protocol", False)
     assert getattr(FilesystemGateway, "_is_protocol", False)
     assert getattr(EnvironmentGateway, "_is_protocol", False)
     assert set(get_annotations(GitGateway)) == set()
@@ -245,6 +243,7 @@ def test_ports_are_runtime_protocols_with_narrow_surface() -> None:
         "check_branch_ref",
         "worktree_list",
         "add_worktree",
+        "add_worktree_bound",
         "remove_worktree",
+        "remove_worktree_bound",
     }
-    assert Ports is ApplicationPorts

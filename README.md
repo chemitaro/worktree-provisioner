@@ -98,7 +98,9 @@ worktree-provisioner create [label] \
 
 Git worktree の作成に成功した後、対象 worktree に `Makefile` があり `init` target を検出できる場合は、既定で
 `make init` を実行します。これは repository の Makefile に書かれた任意コードを実行するため、信頼できる repository
-に対してのみ実行してください。自動 bootstrap を無効にする場合は明示的に `--no-bootstrap` を指定します。
+に対してのみ実行してください。Git checkout hook と filter は抑止されず、`--no-bootstrap` を指定しても実行され得ます。
+`--no-bootstrap` は Make の検出・実行だけを無効にします。Makefile の検出時にも repository 管理下の挙動を評価・実行し得るため、
+create は trusted repository に対してのみ実行してください。
 
 `make init` の検出または実行が失敗しても、作成済み worktree を自動 rollback しません。path、branch、Git record を残したまま
 `status=partial`、終了コード `1`、bootstrap の失敗内容を返します。作成された成果物は利用者が確認・後処理できます。
@@ -158,12 +160,12 @@ worktree-provisioner create --repo /path/to/repository \
   --root /path/to/worktrees --json
 ```
 
-JSON は versioned schema v1 の1文書です。全応答に `schema_version`、`status`、`operation`、`result`、`error`、`warnings`
+JSON は versioned schema v2 の1文書です。全応答に `schema_version`、`status`、`operation`、`result`、`error`、`warnings`
 を含めます。成功は `status=ok`、bootstrap または cleanup の作成済み成果物を伴う失敗は `status=partial`、操作を開始できない
 失敗は `status=error` です。正常終了は `0`、operational error/partial は `1`、CLI usage error は `2` です。JSON mode の
 expected error は stdout にJSONを1文書だけ出し、stderr は空です。
 
-field、型、nullability、各 command の result payload は [JSON schema v1 reference](docs/json-schema-v1.md) を正本とします。
+field、型、nullability、各 command の result payload は [JSON schema v2 reference](docs/json-schema-v2.md) を正本とします。
 agent は human text を解析せず、`status` と `error.code`、result 内の absolute path と artifact state を利用してください。
 `warnings` は成功・partial・terminal error のすべてで必ず確認し、`collision_partial_artifact` があれば message を解析せず
 `facts` の candidate、branch、path、各 existence state をそのまま報告してください。retry 後の後続エラーでも、保持された

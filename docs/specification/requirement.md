@@ -26,7 +26,7 @@ SpecDock は機能・安全性・テスト観点の参照元に限定する。Sp
 本要件の根拠は次の優先順位で扱う。
 
 1. `chemitaro/worktree-provisioner` の `main`、commit `18c80a1f222a31df0617df5c8193388b3c301e0e`
-2. 同 commit の `docs/interview.md` に記録された完了済み owner decisions
+2. `docs/interview.md` に記録された owner decisions。Round 1〜6 は完了済み
 3. 同 commit の既存 `docs/specification/{requirement,design,plan}.md`
 4. 同 commit の prototype code、tests、README、packaging metadata
 5. `chemitaro/spec-dock@ff09fd05d9862c399d4e22e760170dcb8c46ec6a` に対する先行分析
@@ -60,6 +60,14 @@ SpecDock は機能・安全性・テスト観点の参照元に限定する。Sp
 | `OD-019` | standalone tool implementation は後続タスクである。 |
 | `OD-020` | SpecDock-side deletion / migration は本 product task に含めず、本計画にも実装 phase を置かない。 |
 | `OD-021` | repository は public の `chemitaro/worktree-provisioner` とする。 |
+| `OD-022` | managed namespace 直下の1階層だけを `remove` 対象とし、nested descendant は `--force` でも拒否する。`list` / `show` では観測する。 |
+| `OD-023` | `create` は信頼済み repository だけを対象とし、Git checkout hook / clean/smudge/process filter は抑止しない。`--no-bootstrap` は Make 処理だけを無効化する。 |
+| `OD-024` | Make target 検出は repository-controlled Makefile を評価し副作用を起こし得る操作として許容する。信頼済み repository だけで使用する。 |
+| `OD-025` | 検出可能な identity 変更は fail-closed / partial とするが、最後の確認から Git CLI / kernel syscall までの非協調 process の置換は非原子的な out-of-scope race とする。 |
+| `OD-026` | `path_exists` nullable 化に伴い現在の machine contract を schema version `2` とし、v1 compatibility mode は提供しない。 |
+
+Final Quality Gate で追加された nested remove、Git hook/filter、Make detection、final syscall race、JSON schema major の
+5判断は `docs/interview.md` Round 6 で owner answer A として確定し、OD-022〜OD-026 に反映した。
 
 ## 4. 目的
 
@@ -90,7 +98,7 @@ SpecDock は機能・安全性・テスト観点の参照元に限定する。Sp
 - locked/main/current/bare/stale/external/unsafe namespace blockers
 - Git-first removal と guarded target-only cleanup
 - default text output
-- `--json` schema version `1`
+- `--json` schema version `2`
 - partial status と observable artifact state
 - Python package、console entry point、wheel / sdist
 - macOS / Linux verification
@@ -180,6 +188,7 @@ worktree-provisioner remove <TARGET> [--repo PATH] [--root PATH] [--force] [--js
 - `--version` と各 command の `--help` を提供する。
 - `delete` alias は提供しない。
 - top-level `worktree` という中間 subcommand は設けない。
+- `create` は信頼済み repository だけを対象とし、Git checkout hook / clean/smudge/process filter を抑止しないことを help に明記する。
 
 ### `WTP-RQ-003` Repository resolution
 
@@ -247,12 +256,15 @@ preflight 後の `git worktree add` で発生した既知の path/branch/checked
   - `branch_exists`
   - `worktree_record_exists`
 - 観測不能は `false` と断定せず `null` とする。
+- inventory の `path_exists` が `null` の場合は `path_observation_unavailable` blocker とし、`removable=false` とする。
 
 ### `WTP-RQ-009` Bootstrap
 
 - default では Git worktree 作成成功後に bootstrap detection を行う。
 - `Makefile` に `init` target があれば created worktree root を `cwd` として `make init` を実行する。
 - `--no-bootstrap` は detection と execution の両方を行わず `disabled` とする。
+- `--no-bootstrap` は Make detection / execution だけを無効化し、Git checkout hook / filter の実行を抑止しない。
+- Make detection 自体が repository-controlled Makefile を評価・実行し得るため、信頼済み repository だけで使用する。
 - `init` target がない場合は `skipped` とし、create は exit `0` の完全成功とする。
 - `make init` 成功は `succeeded` とし、exit `0` とする。
 - `make` unavailable、Makefile parse/include error、target detection error は `detection_failed` とする。
@@ -300,6 +312,8 @@ preflight 後の `git worktree add` で発生した既知の path/branch/checked
 - locked worktree ではない。
 - path が存在する。
 - final refresh 後も同じ canonical target record として解決できる。
+- initial / refreshed Git record facts（canonical path、branch、head、detached/bare/locked flags、lock reason）が一致する。
+- target entry の no-follow `PathIdentity`（`st_dev`, `st_ino`）が initial observation と final refresh で一致する。
 - namespace が symlink ではない。
 - target が root、namespace、main repo、またはそれらを包含する protected path ではない。
 - 初期版で remove できる managed target は、configured managed namespace の直下にある single path component の
@@ -317,8 +331,12 @@ namespace 直下以外の nested descendant は `list` / `show` で managed reco
 - locked record は Git command を呼ぶ前に `locked_worktree` blocker で拒否する。
 - nested descendant は Git command および filesystem cleanup の前に `nested_target_unsupported` blocker で拒否する。
 - initial resolve 後、mutation 直前に Git records を再取得し、target と blockers を再評価する。
+- initial / refreshed Git facts または no-follow target `PathIdentity` が変化・観測不能になった場合は、Git remove 前に
+  `target_changed_after_refresh` / `path_observation_unavailable` で fail-closed にする。
 - Git remove が失敗した場合は filesystem cleanup、rollback、retry を実行せず、read-only の Git inventory refresh と target `lstat`（no-follow）observation のみ best-effort で許可する。
-- Git remove 成功後に target path が残る場合だけ、containment を再検証して target-only cleanup を行う。
+- Git remove 成功後は target entry の no-follow `PathIdentity` を再観測する。同じ identity の target path が残る場合だけ、
+  containment を再検証して target-only cleanup を行い、identity mismatch は cleanup せず `partial` とする。target が
+  missing なら cleanup は不要として扱う。
 - cleanup は `lstat` 相当で type を確認し、symlink target を follow しない。
 - parent、root、namespace、main repository を削除しない。
 - descriptor-bound operation が利用できる場合も、最後の bound check と Git / kernel mutation の間に発生する
@@ -339,7 +357,7 @@ namespace 直下以外の nested descendant は `list` / `show` で managed reco
 ### `WTP-RQ-015` JSON interface
 
 - `--json` は全4 command に提供する。
-- schema は `schema_version: 1` から開始する。
+- 現在の machine contract は `schema_version: 2` とする。`path_exists` の nullable type change に伴う major change であり、v1 compatibility mode は提供しない。
 - stdout に exactly one JSON document を出す。
 - expected `ok` / `partial` / `error` response では stderr に human duplicate を出さない。
 - common fields は `schema_version`, `status`, `operation`, `result`, `error`, `warnings` とする。
@@ -348,7 +366,7 @@ namespace 直下以外の nested descendant は `list` / `show` で managed reco
 - `partial`: `result` と `error` の双方を持つ。
 - `error`: `result` は `null`、`error` は object。
 - path は absolute string、boolean は JSON boolean、観測不能値は `null` とする。
-- parser usage error も `--json` が明示されていれば schema `1` の error document と exit `2` を返す。
+- parser usage error も `--json` が明示されていれば schema `2` の error document と exit `2` を返す。
 - consumer は message text ではなく error/warning code と typed fields を使用する。
 
 ### `WTP-RQ-016` Exit-code contract
@@ -401,6 +419,7 @@ Remove blocker codes:
 - `bare_worktree`
 - `locked_worktree`
 - `path_missing`
+- `path_observation_unavailable`
 - `record_missing_after_refresh`
 - `target_changed_after_refresh`
 - `outside_managed_namespace`
@@ -413,6 +432,8 @@ Remove blocker codes:
 
 - repository は tool と別に Codex skill deliverable を含む。
 - skill は command semantics、fact checks、authorization boundary、JSON interpretation を記述する。
+- skill の create preflight は trusted repository であることを要求し、Git checkout hook / clean/smudge/process filter が
+  実行され得ること、`--no-bootstrap` でも Git 側の副作用は抑止されず Make detection / execution だけを無効化することを明記する。
 - thin wrapper は PATH 上の `worktree-provisioner` を `exec` するだけとし、root selection、target resolution、Git、make、filesystem logic を持たない。
 - wrapper は argv、stdout、stderr、exit status をそのまま伝播する。
 - CLI が PATH にない場合だけ明確な installation error を返す。
@@ -600,9 +621,13 @@ namespace の ancestor inode を rename / replace することを、現在の Gi
 ### `WTP-AC-012` Remove refresh and cleanup
 
 - target disappearance、path change、new ambiguity、new blocker を final refresh で検出する。
+- initial / refreshed Git facts と no-follow target `PathIdentity`（`st_dev`, `st_ino`）の一致を確認し、変更時は Git remove
+  前に fail-closed とする。
 - nested descendant は final mutation に到達する前に `nested_target_unsupported` で拒否し、Git remove と filesystem
   cleanup を呼ばない。
 - Git remove failure 後は filesystem cleanup を行わず、read-only の inventory refresh と target `lstat` observation のみ best-effort で許可する。
+- Git remove success 後に target identity が mismatch した場合は cleanup せず `status=partial` とし、target が missing
+  の場合は cleanup 不要として扱う。
 - Git success 後の leftover directory / symlink / broken symlink / regular file を target-only で処理する。
 - parent/root/namespace/main repo sentinel は残る。
 - cleanup failure は `status=partial`, exit `1`, `removed_record=true`, `removed_directory=false`。
@@ -610,7 +635,7 @@ namespace の ancestor inode を rename / replace することを、現在の Gi
 
 ### `WTP-AC-013` JSON schema and streams
 
-- 全 command の ok / partial / error response が schema version `1` に適合する。
+- 全 command の ok / partial / error response が schema version `2` に適合する。
 - `result` / `error` nullability と field types を固定する。
 - expected JSON response は stdout の exactly one document で、stderr は空である。
 - `--json` usage error は exit `2` と versioned error JSON を返す。
@@ -688,9 +713,9 @@ namespace の ancestor inode を rename / replace することを、現在の Gi
 
 ### 10.3 JSON evolution
 
-- schema version は integer `1` から開始する。
+- 現在の schema version は integer `2` とする。`path_exists` nullable 化による type change は major change である。
 - field removal、rename、type change、enum semantic change、error code semantic changeは schema major update を必要とする。
-- additive field は consumer が unknown fields を無視できる前提で schema `1` 内に追加可能とする。
+- additive field は consumer が unknown fields を無視できる前提で schema `2` 内に追加可能とする。
 - package SemVer と JSON schema version は別管理とする。
 
 ## 11. Implementation-level choices that remain local

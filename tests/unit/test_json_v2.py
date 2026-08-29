@@ -18,7 +18,7 @@ from worktree_provisioner.application.contracts import (
     ShowResult,
     WorktreeRecordView,
 )
-from worktree_provisioner.presentation.json_v1 import (
+from worktree_provisioner.presentation.json_v2 import (
     dumps,
     envelope,
     error_document,
@@ -132,6 +132,38 @@ def test_error_builder_explicitly_converts_nested_candidates_and_nulls_result() 
     assert payload["details"]["candidates"][1]["remove_blockers"] == ["outside_managed_namespace"]
 
 
+def test_worktree_payload_preserves_unknown_path_observation_as_json_null() -> None:
+    unknown_path = WorktreeRecordView(
+        id="unknown",
+        path=Path("relative/worktrees/repo-unknown"),
+        basename="repo-unknown",
+        branch="unknown",
+        head=None,
+        detached=False,
+        bare=False,
+        locked=False,
+        lock_reason=None,
+        main=False,
+        current=False,
+        path_exists=None,
+        record_exists=True,
+        managed=True,
+        classification_available=True,
+        classification_reason="root_valid",
+        origin="managed_namespace",
+        removable=False,
+        remove_blockers=("path_observation_unavailable",),
+    )
+
+    document = success_document(ListResult((unknown_path,)))
+    payload = cast(dict[str, Any], document["result"])
+    listed = cast(list[Any], payload["worktrees"])
+    assert cast(dict[str, Any], listed[0])["path_exists"] is None
+
+    serialized = json.loads(dumps(document))
+    assert serialized["result"]["worktrees"][0]["path_exists"] is None
+
+
 def test_all_public_error_codes_are_emittable() -> None:
     codes = get_args(ErrorCode)
     assert codes
@@ -145,7 +177,7 @@ def test_all_public_error_codes_are_emittable() -> None:
             status="error",
         )
         document = error_document(error)
-        assert document["schema_version"] == 1
+        assert document["schema_version"] == 2
         assert document["status"] == "error"
         assert document["result"] is None
         assert cast(dict[str, Any], document["error"])["code"] == code
@@ -339,7 +371,7 @@ def test_partial_keeps_result_and_usage_error_is_versioned() -> None:
 
     usage = usage_error_document("missing target", operation="show")
     assert usage == {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "error",
         "operation": "show",
         "result": None,

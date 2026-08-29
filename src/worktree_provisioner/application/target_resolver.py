@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from pathlib import Path
 
-from worktree_provisioner.application.contracts import WorktreeRecordView
+from worktree_provisioner.application.contracts import ErrorCode, WorktreeRecordView
 from worktree_provisioner.application.root_and_naming import canonical_path
 
 
@@ -20,10 +20,10 @@ class TargetResolutionError(ValueError):
 
     __slots__ = ("code", "details")
 
-    code: str
+    code: ErrorCode
     details: dict[str, object]
 
-    def __init__(self, *, code: str, message: str, details: dict[str, object]) -> None:
+    def __init__(self, *, code: ErrorCode, message: str, details: dict[str, object]) -> None:
         super().__init__(message)
         self.code = code
         self.details = details

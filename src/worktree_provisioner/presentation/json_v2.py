@@ -1,4 +1,4 @@
-"""Versioned JSON schema v1 for the command-line boundary.
+"""Versioned JSON schema v2 for the command-line boundary.
 
 The application layer deliberately exposes immutable dataclasses and
 ``pathlib.Path`` values.  This module is the single, explicit conversion
@@ -20,14 +20,17 @@ from worktree_provisioner.application.contracts import (
     ExpectedError,
     GitWorktreeRecord,
     ListResult,
+    Operation,
     RemoveResult,
+    ResponseStatus,
     ResultWarning,
     ShowResult,
     WorktreeRecordView,
 )
+from worktree_provisioner.diagnostics import bounded as _bounded
 from worktree_provisioner.encoding import restore_utf8_surrogates
 
-SCHEMA_VERSION: Final[int] = 1
+SCHEMA_VERSION: Final[int] = 2
 
 
 def success_document(result: object) -> dict[str, object]:
@@ -59,7 +62,7 @@ def error_document(error: ExpectedError) -> dict[str, object]:
     )
 
 
-def usage_error_document(message: str, *, operation: str | None = None) -> dict[str, object]:
+def usage_error_document(message: str, *, operation: Operation | None = None) -> dict[str, object]:
     """Build the parser-error document used when ``--json`` was explicit."""
 
     return {
@@ -78,13 +81,13 @@ def usage_error_document(message: str, *, operation: str | None = None) -> dict[
 
 def envelope(
     *,
-    status: str,
-    operation: str | None,
+    status: ResponseStatus,
+    operation: Operation | None,
     result: object | None,
     error: ExpectedError | None,
     warnings: Sequence[Mapping[str, object] | ResultWarning] = (),
 ) -> dict[str, object]:
-    """Build the common v1 envelope with all fields present."""
+    """Build the common v2 envelope with all fields present."""
 
     if error is None:
         error_payload: object | None = None
@@ -127,7 +130,7 @@ def _warnings_for_result(result: object | None) -> tuple[ResultWarning, ...]:
 
 
 def dumps(document: Mapping[str, object]) -> str:
-    """Serialize exactly one v1 document without a trailing human message."""
+    """Serialize exactly one v2 document without a trailing human message."""
 
     # JSON is written through the process stdout text stream.  ASCII-only
     # serialization keeps the wire contract independent of that stream's
@@ -136,7 +139,7 @@ def dumps(document: Mapping[str, object]) -> str:
     return json.dumps(document, ensure_ascii=True)
 
 
-def operation_for_result(result: object) -> str:
+def operation_for_result(result: object) -> Operation:
     if isinstance(result, CreateResult):
         return "create"
     if isinstance(result, ListResult):
@@ -273,14 +276,6 @@ def remove_payload(result: RemoveResult) -> dict[str, object]:
 def _absolute_path(path: Path) -> str:
     candidate = path.expanduser()
     return restore_utf8_surrogates(str(candidate if candidate.is_absolute() else candidate.absolute()))
-
-
-def _bounded(value: str, limit: int = 4096) -> str:
-    if len(value) <= limit:
-        return value
-    if limit <= 1:
-        return value[:limit]
-    return f"{value[: limit - 1]}…"
 
 
 __all__ = [

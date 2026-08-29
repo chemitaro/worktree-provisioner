@@ -163,6 +163,46 @@ def test_namespace_symlink_keeps_inventory_observable_but_unavailable(tmp_path: 
         assert record.remove_blockers[-1] == "classification_unavailable"
 
 
+def test_inventory_distinguishes_unknown_path_observation_from_missing(tmp_path: Path) -> None:
+    repo = tmp_path / "checkout"
+    repo.mkdir()
+    root = tmp_path / "root"
+    namespace = root / "checkout"
+    namespace.mkdir(parents=True)
+    target = namespace / "checkout-feature"
+    target.mkdir()
+
+    class FailingPathObservationFilesystem(FilesystemCliGateway):
+        def path_exists_no_follow(self, path: Path) -> bool:
+            if path == target:
+                raise OSError("path observation interrupted")
+            return super().path_exists_no_follow(path)
+
+    git = FakeGitGateway(
+        checkout_root=repo,
+        records=[
+            FakeGitRecord(path=repo, branch="main"),
+            FakeGitRecord(path=target, branch="feature"),
+        ],
+    )
+    service = WorktreeService(
+        ApplicationPorts(
+            git=cast(GitGateway, git),
+            bootstrap=cast(BootstrapGateway, FakeBootstrapGateway()),
+            filesystem=FailingPathObservationFilesystem(),
+            environment=EnvironmentAdapter(),
+        )
+    )
+
+    result = service.list(ListRequest(repo_root=repo, root=root))
+    record = next(item for item in result.worktrees if item.branch == "feature")
+
+    assert record.path_exists is None
+    assert record.removable is False
+    assert record.managed is True
+    assert record.origin == "managed_namespace"
+
+
 def test_main_id_is_reserved_and_suffix_shaped_ids_remain_unique(tmp_path: Path) -> None:
     repo = tmp_path / "checkout"
     repo.mkdir()

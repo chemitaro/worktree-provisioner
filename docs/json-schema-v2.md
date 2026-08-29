@@ -1,10 +1,10 @@
-# JSON schema v1
+# JSON schema v2
 
 `worktree-provisioner --json` は、実行環境にかかわらず次の envelope を stdout に1文書だけ出力します。
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "status": "ok",
   "operation": "create",
   "result": {},
@@ -17,7 +17,7 @@
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `schema_version` | integer | 常に `1`。将来の envelope 変更は別 version とする |
+| `schema_version` | integer | 常に `2`。将来の envelope 変更は別 version とする |
 | `status` | `ok` / `partial` / `error` | 操作結果の状態 |
 | `operation` | `create` / `list` / `show` / `remove` / `null` | 実行した command。parse 前の usage error は `null` の場合がある |
 | `result` | object / `null` | 成功または partial の operation payload |
@@ -65,14 +65,15 @@ warning の形は次のとおりです。
 `worktree` は `id`、`path`、`basename`、`branch`、`head`、`detached`、`bare`、`locked`、`lock_reason`、`main`、
 `current`、`path_exists`、`record_exists`、`managed`、`classification_available`、`classification_reason`、`origin`、
 `removable`、`remove_blockers` を持ちます。path は常に absolute string、unknown な nullable value は `null`、boolean は
-boolean、blocker の一覧は配列です。managed namespace の直下以外の nested descendant は `managed=true` を維持しつつ
+boolean、blocker の一覧は配列です。`path_exists` が `null` の場合は観測不能を表し、`path_observation_unavailable` blocker と
+`removable=false` を併記します。managed namespace の直下以外の nested descendant は `managed=true` を維持しつつ
 `removable=false`、`remove_blockers=["nested_target_unsupported"]` となります。これは `--force` でも解除されません。
 
 ## Example: bootstrap partial
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "status": "partial",
   "operation": "create",
   "result": {

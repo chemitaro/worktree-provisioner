@@ -13,7 +13,7 @@ from worktree_provisioner.infra.environment import EnvironmentAdapter
 from worktree_provisioner.infra.filesystem import DirectoryHandle, FilesystemCliGateway
 from worktree_provisioner.infra.git_cli import GitCliGateway
 from worktree_provisioner.infra.make_cli import MakeCliGateway
-from worktree_provisioner.presentation import json_v1, text
+from worktree_provisioner.presentation import json_v2, text
 
 
 def test_create_json_contract_has_absolute_facts(
@@ -25,7 +25,7 @@ def test_create_json_contract_has_absolute_facts(
     expected = central_root / temp_git_repo.path.name / f"{temp_git_repo.path.name}-setup"
     assert result.returncode == 0, result.stderr
     assert result.stderr == ""
-    assert payload["schema_version"] == 1
+    assert payload["schema_version"] == 2
     assert payload["status"] == "ok"
     assert payload["operation"] == "create"
     assert payload["error"] is None
@@ -120,7 +120,7 @@ def test_create_retries_real_git_path_race_and_retains_partial_branch(
     assert "path_exists=True" in warning.message
     assert "branch_exists=True" in warning.message
 
-    document = json_v1.success_document(result)
+    document = json_v2.success_document(result)
     assert document["warnings"] == [{"code": warning.code, "message": warning.message, "facts": dict(warning.facts)}]
     text_warnings = text.render_warnings(result)
     assert len(text_warnings) == 1
@@ -534,6 +534,48 @@ def test_create_with_successful_make_init_reports_succeeded(
     assert payload["result"]["bootstrap"]["status"] == "succeeded"
     assert payload["result"]["bootstrap"]["command"] == ["make", "init"]
     assert (target / ".init-ran").read_text(encoding="utf-8") == "initialized"
+
+
+def test_create_does_not_suppress_git_hooks_or_filters(
+    temp_git_repo: TempGitRepository, central_root: Path, cli_runner, json_loads
+) -> None:
+    hook = temp_git_repo.path / ".git" / "hooks" / "post-checkout"
+    hook.write_text("#!/bin/sh\nprintf 'hook\\n' > hook.marker\n", encoding="utf-8")
+    hook.chmod(0o755)
+
+    filter_script = temp_git_repo.path / "checkout-filter.sh"
+    filter_script.write_text("#!/bin/sh\nprintf 'filter\\n' > filter.marker\ncat\n", encoding="utf-8")
+    filter_script.chmod(0o755)
+    (temp_git_repo.path / ".gitattributes").write_text("tracked.txt filter=probe\n", encoding="utf-8")
+    temp_git_repo.git("add", ".gitattributes")
+    temp_git_repo.git("commit", "-m", "configure checkout filter")
+    temp_git_repo.git("config", "filter.probe.smudge", str(filter_script))
+    temp_git_repo.git("config", "filter.probe.clean", "cat")
+
+    result = cli_runner(
+        "create", "side-effects", "--no-bootstrap", "--json", repo=temp_git_repo.path, root=central_root
+    )
+    payload = json_loads(result.stdout)
+    target = central_root / temp_git_repo.path.name / f"{temp_git_repo.path.name}-side-effects"
+
+    assert result.returncode == 0, result.stderr
+    assert payload["result"]["bootstrap"]["status"] == "disabled"
+    assert (target / "hook.marker").read_text(encoding="utf-8") == "hook\n"
+    assert (target / "filter.marker").read_text(encoding="utf-8") == "filter\n"
+
+
+def test_create_make_detection_can_evaluate_repository_controlled_behavior_without_init_target(
+    git_repo_factory, central_root: Path, cli_runner, json_loads
+) -> None:
+    repo = git_repo_factory(makefile="DETECTION := $(shell printf detected > detection-marker)\nall:\n\t@true\n")
+    result = cli_runner("create", "make-side-effect", "--json", repo=repo.path, root=central_root)
+    payload = json_loads(result.stdout)
+    target = central_root / repo.path.name / f"{repo.path.name}-make-side-effect"
+
+    assert result.returncode == 0, result.stderr
+    assert payload["result"]["bootstrap"]["status"] == "skipped"
+    assert payload["result"]["bootstrap"]["command"] is None
+    assert (target / "detection-marker").read_text(encoding="utf-8") == "detected"
 
 
 def test_create_rejects_broken_root_symlink_without_creating_target(
