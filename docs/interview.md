@@ -347,19 +347,80 @@ Round 1〜4の回答、既知事実、scope外、GitHub publication authorityを
 
 Answer: A。Round 1〜4の回答を正規のowner decision artifactとして確定し、共通理解に到達した。repository作成、initial commit/push、同じChatGPT sessionへのStrict follow-upへ進む。
 
-## 9. 回答後に展開する判断
+## 9. Round 6 — Final Quality Gate で判明した追加判断
 
-- command scope に応じた remove force、locked、stale、protected path policy
-- JSON schema、error code、stdout/stderr、exit code contract
-- root path、環境変数、legacy compatibility policy
-- symlink、containment、race、partial artifact policy
-- skill の自動実行範囲、確認事項、wrapper の責務
-- packaging、install method、repository/publication policy
-- parity test、acceptance gate、SpecDock removal sequence
+Status: answered on 2026-08-30
 
-## 10. ChatGPT Use 再共有条件
+Round 1〜5 の回答後に実装・独立レッドレビュー・ChatGPT Use Strict Extra High を進めた結果、既存回答だけでは
+確定できない Product / Security / Compatibility 判断が5件見つかった。以下の推奨案について、ownerがQ27〜Q31を
+すべてAとして確定した。
+
+2026-08-30 に ChatGPT Use（session `required-repository-connector-context-repository-133`、GPT-5.6 Sol、Extra High）へ
+現行仕様・実装・テスト・レポートの19ファイルを渡して独立分析した。分析はQ27〜Q31のすべてで推奨案Aを支持し、
+Q31はschema v2へのproduction変更、Q28/Q29はCLI helpを含むtrust boundary同期が必要とした。この結果はadvisoryであり、
+以下のowner answerを代替しない。
+
+### Q27 — nested managed worktree の remove 範囲
+
+- A: `list` / `show` では観測するが、初期版の `remove` は managed namespace 直下の1階層だけを対象とし、nested descendant は `--force` でも拒否する
+- B: containment と既存 blocker を満たす nested descendant も `remove` 対象にする
+
+推奨: A。descriptor-bound parent と削除対象の関係を単純に保ち、初期版の destructive scope を狭くできるため。
+
+Answer: A。`list` / `show` では観測するが、初期版の `remove` は managed namespace 直下の1階層だけを対象とし、nested descendant は `--force` でも拒否する。
+
+### Q28 — Git checkout hook / filter の実行権限
+
+- A: `git worktree add` が通常の checkout として起動し得る hook および clean/smudge/process filter は抑止せず、信頼済み repository だけを create 対象にする。`--no-bootstrap` は Make 処理だけを無効化する
+- B: hook / filter を抑止できる別の checkout 方針へ変更し、それを create 契約にする
+
+推奨: A。Git の通常 checkout semantics を維持し、`--no-bootstrap` の責務を Make に限定したうえで、実行権限を利用者へ明示できるため。
+
+Answer: A。`git worktree add` が通常の checkout として起動し得る hook および clean/smudge/process filter は抑止せず、信頼済み repository だけを create 対象にする。`--no-bootstrap` は Make 処理だけを無効化する。
+
+### Q29 — Make target 検出時の trust boundary
+
+- A: `make -n init` / database probe による target 検出も repository-controlled Makefile を評価し副作用を起こし得る操作として許容し、信頼済み repository だけで使用する。help / README / skill に明記する
+- B: Makefile を一切評価しない静的検出へ置換し、対応できない Make 構文は bootstrap 対象外にする
+- C: automatic bootstrap を廃止し、明示指定時だけ Makefile を評価する
+
+推奨: A。Q5 の automatic bootstrap と既存の Make target semantics を維持しつつ、検出を安全な dry-run と誤認させないため。
+
+Answer: A。`make -n init` / database probe による target 検出も repository-controlled Makefile を評価し副作用を起こし得る操作として許容し、信頼済み repository だけで使用する。help / README / skill に明記する。
+
+### Q30 — remove の最終 syscall race 境界
+
+- A: Git record facts と no-follow target identity で検出可能な置換を fail-closed / partial にするが、最後の確認から Git CLI / kernel syscall までに同一ユーザーの非協調 process が行う置換は非原子的な out-of-scope race と明記する
+- B: 現在の Git CLI architecture を変更し、最終 syscall window を原子的に閉じられるまで remove を提供しない
+
+推奨: A。検出可能な干渉では別対象を削除せず、現在の macOS / Linux 共通実装で保証できない境界を誇張せず公開できるため。
+
+Answer: A。Git record facts と no-follow target identity で検出可能な置換を fail-closed / partial にするが、最後の確認から Git CLI / kernel syscall までに同一ユーザーの非協調 process が行う置換は非原子的な out-of-scope race と明記する。
+
+### Q31 — `path_exists` nullable 化に伴う JSON schema version
+
+- A: `path_exists: bool` から `bool | null` への type change を既存 evolution policy どおり major change とし、現在の machine contract を schema version `2` にする。v1 compatibility mode は追加しない
+- B: 未完成のpre-release契約として schema version `1` を置換し、例外として同じversionを維持する
+- C: nullable 化を取り消し、観測不能を別の additive field だけで表す
+
+推奨: A。公開済み正本の「type change は schema major update」という規則を守り、consumer が `false` と観測不能を区別できるため。
+
+Answer: A。`path_exists: bool` から `bool | null` への type change を既存 evolution policy どおり major change とし、現在の machine contract を schema version `2` にする。v1 compatibility mode は追加しない。
+
+## 10. 回答後に同期する契約
+
+- command scope に応じた remove force、locked、stale、protected path policy は既存回答と整合させる。
+- JSON schema、error code、stdout/stderr、exit code contract は schema version `2` として同期する。
+- root path、環境変数、legacy compatibility policy は既存回答と整合させる。
+- symlink、containment、race、partial artifact policy は Q30 の final syscall 境界を含めて同期する。
+- skill の自動実行範囲、確認事項、wrapper の責務は Q28/Q29 の trust boundary を含めて同期する。
+- packaging、install method、repository/publication policy は既存回答と整合させる。
+- parity test、acceptance gate、SpecDock removal sequence は schema v2 と Round 6 の owner decision を参照する。
+
+## 11. ChatGPT Use 再共有条件
 
 - 設計木の frontier が空である。
 - 全回答について、選択肢、自由記述、理由、例外を記録している。
 - ユーザーが shared understanding に到達したことを明示的に確認している。
 - 未決事項を ChatGPT 側で推測して埋めないよう明記できる。
+- Round 6 の Q27〜Q31 はすべて owner answer A として確定している。

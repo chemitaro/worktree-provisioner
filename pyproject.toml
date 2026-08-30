@@ -5,24 +5,42 @@ build-backend = "hatchling.build"
 [project]
 name = "worktree-provisioner"
 version = "0.1.0"
-description = "Create centrally managed Git linked worktrees with collision-safe naming"
+description = "Standalone CLI for safe Git linked worktree create, list, show, and remove operations"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
+license-files = ["LICENSE"]
 authors = [{ name = "worktree-provisioner contributors" }]
 dependencies = []
+classifiers = [
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+]
+
+[project.urls]
+Homepage = "https://github.com/chemitaro/worktree-provisioner"
+Repository = "https://github.com/chemitaro/worktree-provisioner"
+Issues = "https://github.com/chemitaro/worktree-provisioner/issues"
 
 [project.scripts]
 worktree-provisioner = "worktree_provisioner.cli:main"
 
 [dependency-groups]
 dev = [
+  "mypy>=1.15.0",
   "pytest>=8.0",
   "ruff>=0.12.0",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+strict_markers = true
 
 [tool.ruff]
 target-version = "py310"
@@ -31,6 +49,13 @@ line-length = 120
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/worktree_provisioner"]
 
+[tool.hatch.build.targets.sdist]
+exclude = ["/docs/implementation-report.md"]

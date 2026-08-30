@@ -1,0 +1,298 @@
+"""Versioned JSON schema v2 for the command-line boundary.
+
+The application layer deliberately exposes immutable dataclasses and
+``pathlib.Path`` values.  This module is the single, explicit conversion
+boundary to the machine contract; it does not rely on implicit dataclass
+flattening so field names, nullability, and path handling remain reviewable.
+"""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+from typing import Final
+
+from worktree_provisioner.application.contracts import (
+    ArtifactState,
+    BootstrapResult,
+    CreateResult,
+    ExpectedError,
+    GitWorktreeRecord,
+    ListResult,
+    Operation,
+    RemoveResult,
+    ResponseStatus,
+    ResultWarning,
+    ShowResult,
+    WorktreeRecordView,
+)
+from worktree_provisioner.diagnostics import bounded as _bounded
+from worktree_provisioner.encoding import restore_utf8_surrogates
+
+SCHEMA_VERSION: Final[int] = 2
+
+
+def success_document(result: object) -> dict[str, object]:
+    """Build an ``ok`` envelope for one known operation result."""
+
+    return envelope(
+        status="ok",
+        operation=operation_for_result(result),
+        result=result,
+        error=None,
+        warnings=_warnings_for_result(result),
+    )
+
+
+def error_document(error: ExpectedError) -> dict[str, object]:
+    """Build an expected operational-error envelope."""
+
+    result = error.result if error.status == "partial" else None
+    return envelope(
+        status=error.status,
+        operation=error.operation,
+        result=result,
+        error=error,
+        # A terminal error may not have a partial result (for example, a
+        # later candidate failure after one or more collision retries).  Keep
+        # the accumulated typed warnings at the envelope boundary in that
+        # case; a partial result remains the fallback for older callers.
+        warnings=error.warnings or _warnings_for_result(result),
+    )
+
+
+def usage_error_document(message: str, *, operation: Operation | None = None) -> dict[str, object]:
+    """Build the parser-error document used when ``--json`` was explicit."""
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "status": "error",
+        "operation": operation,
+        "result": None,
+        "error": {
+            "code": "usage_error",
+            "message": "invalid command-line usage",
+            "details": {"diagnostic": _bounded(message)},
+        },
+        "warnings": [],
+    }
+
+
+def envelope(
+    *,
+    status: ResponseStatus,
+    operation: Operation | None,
+    result: object | None,
+    error: ExpectedError | None,
+    warnings: Sequence[Mapping[str, object] | ResultWarning] = (),
+) -> dict[str, object]:
+    """Build the common v2 envelope with all fields present."""
+
+    if error is None:
+        error_payload: object | None = None
+    else:
+        error_payload = {
+            "code": error.code,
+            "message": error.message,
+            "details": json_value(error.details),
+        }
+
+    warning_payloads: list[dict[str, object]] = []
+    for warning in warnings:
+        if isinstance(warning, ResultWarning):
+            payload: dict[str, object] = {"code": warning.code, "message": warning.message}
+            if warning.facts:
+                payload["facts"] = json_value(warning.facts)
+            warning_payloads.append(payload)
+        else:
+            warning_payloads.append(
+                {
+                    "code": str(warning.get("code", "diagnostic")),
+                    "message": str(warning.get("message", "")),
+                }
+            )
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "status": status,
+        "operation": operation,
+        "result": json_value(result) if result is not None else None,
+        "error": error_payload,
+        "warnings": warning_payloads,
+    }
+
+
+def _warnings_for_result(result: object | None) -> tuple[ResultWarning, ...]:
+    if isinstance(result, CreateResult):
+        return result.warnings
+    return ()
+
+
+def dumps(document: Mapping[str, object]) -> str:
+    """Serialize exactly one v2 document without a trailing human message."""
+
+    # JSON is written through the process stdout text stream.  ASCII-only
+    # serialization keeps the wire contract independent of that stream's
+    # ambient locale/encoding while remaining reversible for every Unicode
+    # path and diagnostic.
+    return json.dumps(document, ensure_ascii=True)
+
+
+def operation_for_result(result: object) -> Operation:
+    if isinstance(result, CreateResult):
+        return "create"
+    if isinstance(result, ListResult):
+        return "list"
+    if isinstance(result, ShowResult):
+        return "show"
+    if isinstance(result, RemoveResult):
+        return "remove"
+    raise TypeError(f"unsupported command result: {type(result).__name__}")
+
+
+def json_value(value: object) -> object:
+    """Convert supported application values without implicit dataclass flattening."""
+
+    if isinstance(value, str):
+        return restore_utf8_surrogates(value)
+    if value is None or isinstance(value, (int, float, bool)):
+        return value
+    if isinstance(value, Path):
+        return _absolute_path(value)
+    if isinstance(value, BootstrapResult):
+        return json_value(bootstrap_payload(value))
+    if isinstance(value, ArtifactState):
+        return json_value(artifact_payload(value))
+    if isinstance(value, WorktreeRecordView):
+        return json_value(worktree_payload(value))
+    if isinstance(value, GitWorktreeRecord):
+        return json_value(git_record_payload(value))
+    if isinstance(value, CreateResult):
+        return json_value(create_payload(value))
+    if isinstance(value, ListResult):
+        return json_value(list_payload(value))
+    if isinstance(value, ShowResult):
+        return json_value(show_payload(value))
+    if isinstance(value, RemoveResult):
+        return json_value(remove_payload(value))
+    if isinstance(value, Mapping):
+        return {str(key): json_value(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [json_value(item) for item in value]
+    if isinstance(value, set):
+        return [json_value(item) for item in sorted(value, key=str)]
+    # Details should normally contain only the types above.  A bounded string
+    # is safer than exposing an arbitrary object's private attributes.
+    return _bounded(str(value))
+
+
+def bootstrap_payload(result: BootstrapResult) -> dict[str, object]:
+    return {
+        "requested": result.requested,
+        "status": result.status,
+        "command": list(result.command) if result.command is not None else None,
+        "exit_code": result.exit_code,
+        "detail": result.detail,
+    }
+
+
+def artifact_payload(result: ArtifactState) -> dict[str, bool | None]:
+    return {
+        "container_exists": result.container_exists,
+        "worktree_path_exists": result.worktree_path_exists,
+        "branch_exists": result.branch_exists,
+        "worktree_record_exists": result.worktree_record_exists,
+    }
+
+
+def git_record_payload(result: GitWorktreeRecord) -> dict[str, object]:
+    return {
+        "path": _absolute_path(result.path),
+        "head": result.head,
+        "branch": result.branch,
+        "detached": result.detached,
+        "bare": result.bare,
+        "locked": result.locked,
+        "lock_reason": result.lock_reason,
+    }
+
+
+def worktree_payload(result: WorktreeRecordView) -> dict[str, object]:
+    return {
+        "id": result.id,
+        "path": _absolute_path(result.path),
+        "basename": result.basename,
+        "branch": result.branch,
+        "head": result.head,
+        "detached": result.detached,
+        "bare": result.bare,
+        "locked": result.locked,
+        "lock_reason": result.lock_reason,
+        "main": result.main,
+        "current": result.current,
+        "path_exists": result.path_exists,
+        "record_exists": result.record_exists,
+        "managed": result.managed,
+        "classification_available": result.classification_available,
+        "classification_reason": result.classification_reason,
+        "origin": result.origin,
+        "removable": result.removable,
+        "remove_blockers": list(result.remove_blockers),
+    }
+
+
+def create_payload(result: CreateResult) -> dict[str, object]:
+    return {
+        "id": result.id,
+        "main_worktree_path": _absolute_path(result.main_worktree_path),
+        "container_path": _absolute_path(result.container_path),
+        "worktree_path": _absolute_path(result.worktree_path),
+        "branch": result.branch,
+        "bootstrap": bootstrap_payload(result.bootstrap),
+        "artifacts": artifact_payload(result.artifacts),
+    }
+
+
+def list_payload(result: ListResult) -> dict[str, object]:
+    return {"worktrees": [worktree_payload(item) for item in result.worktrees]}
+
+
+def show_payload(result: ShowResult) -> dict[str, object]:
+    return {"target": result.target, "worktree": worktree_payload(result.worktree)}
+
+
+def remove_payload(result: RemoveResult) -> dict[str, object]:
+    return {
+        "target": result.target,
+        "resolved_target": worktree_payload(result.resolved_target),
+        "force_requested": result.force_requested,
+        "removed_record": result.removed_record,
+        "removed_directory": result.removed_directory,
+        "branch_deleted": result.branch_deleted,
+    }
+
+
+def _absolute_path(path: Path) -> str:
+    candidate = path.expanduser()
+    return restore_utf8_surrogates(str(candidate if candidate.is_absolute() else candidate.absolute()))
+
+
+__all__ = [
+    "SCHEMA_VERSION",
+    "artifact_payload",
+    "bootstrap_payload",
+    "create_payload",
+    "dumps",
+    "envelope",
+    "error_document",
+    "git_record_payload",
+    "json_value",
+    "list_payload",
+    "operation_for_result",
+    "remove_payload",
+    "show_payload",
+    "success_document",
+    "usage_error_document",
+    "worktree_payload",
+]
