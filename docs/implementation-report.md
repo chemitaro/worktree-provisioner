@@ -148,6 +148,11 @@ build、fresh-wheel smoke、wrapper shell syntax、`git diff --check`を再実�
 - wheel: `854a976b7be03284b738eb3d8abac945b45ddb3a2762c0eb7b84a4703d0eb0f6`
 - sdist: `38454dfa155b860824d3589e4eb88f21be3fc3ec9ece97134f6b41bdec94b0dd`
 
+最終implementation SHAは `d2b9c7e32a81adc1ddad1b5ed949f8e481477bfc`。GitHub Actions run `33268803438` は
+同一SHAのmacOS/Linux × Python 3.10〜3.13全8 jobで成功した。同一Strict reviewer conversationのExtra High
+follow-upは `P0=0`、`P1=0`、`review_status=pass`。その後の手動smokeではthin wrapper経由で`work3`を作成し、
+human/JSONのcreate/list/show、branch、HEAD、clean stateの一致を確認した。
+
 ## 8. 最終完了条件
 
 次をすべて満たした場合だけ完成とする。
@@ -155,9 +160,9 @@ build、fresh-wheel smoke、wrapper shell syntax、`git diff --check`を再実�
 - [x] Round 6のQ27〜Q31がowner answerとして確定している。
 - [x] requirement / design / plan / README / help / skill / JSON schema / testsが回答と一致する。
 - [x] 最終候補でRuff format、Ruff lint、Mypy、Pytest、build、fresh-wheel smoke、`git diff --check`が成功する。
-- [ ] 最終候補をtask branchへcommit / pushする。
-- [ ] 最終SHAに対するGitHub Actions macOS/Linux × Python 3.10〜3.13が全job成功する。
-- [ ] 同一Strict reviewer sessionをExtra Highでfollow-upし、P0=0、P1=0、`review_status=pass`を得る。
-- [ ] 最終提出でexact SHA、CI run、Strict結果、配布物hash、残るscope外を報告する。
+- [x] 最終候補をtask branchへcommit / pushする。
+- [x] 最終SHAに対するGitHub Actions macOS/Linux × Python 3.10〜3.13が全job成功する。
+- [x] 同一Strict reviewer sessionをExtra Highでfollow-upし、P0=0、P1=0、`review_status=pass`を得る。
+- [x] 最終提出でexact SHA、CI run、Strict結果、配布物hash、残るscope外を報告する。
 
-現時点のstatusは **in progress** であり、Final Quality Gate passをまだ主張しない。
+現時点のstatusは **complete**。初期完成スコープの実装、検証、Final Quality Gate、手動smokeは完了している。

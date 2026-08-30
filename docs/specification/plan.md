@@ -1,13 +1,13 @@
 ---
 document: plan
 product: worktree-provisioner
-status: proposed
+status: complete
 verified_repository: chemitaro/worktree-provisioner
-verified_branch: main
-verified_sha: 18c80a1f222a31df0617df5c8193388b3c301e0e
+verified_branch: codex/implement-worktree-provisioner
+verified_sha: d2b9c7e32a81adc1ddad1b5ed949f8e481477bfc
 owner_decision_source: docs/interview.md
 owner_decision_status: complete
-verified_at: 2026-08-24
+verified_at: 2026-08-31
 language: ja
 ---
 
@@ -15,13 +15,14 @@ language: ja
 
 ## 1. 計画の目的と境界
 
-本計画は `worktree-provisioner` standalone tool、versioned JSON interface、Codex skill、thin wrapper を後続実装タスクで完成させるための ordered plan である。現時点では code implementation、commit、push、release を完了したとは扱わない。
+本計画は `worktree-provisioner` standalone tool、versioned JSON interface、Codex skill、thin wrapper を完成させた
+ordered implementation recordである。code implementation、task branchへのcommit/push、local/CI/Strict gate、手動smokeは完了している。
 
 計画 baseline:
 
 - repository: `chemitaro/worktree-provisioner`
-- branch: `main`
-- verified SHA: `18c80a1f222a31df0617df5c8193388b3c301e0e`
+- branch: `codex/implement-worktree-provisioner`
+- verified implementation SHA: `d2b9c7e32a81adc1ddad1b5ed949f8e481477bfc`
 - owner decisions: `docs/interview.md` Round 1〜6 complete
 - current implementation: four-command implementation with schema v2
 
@@ -990,9 +991,14 @@ Repositoryは既にpublicであるが、次は別の明示authorityを必要と�
 | `OD-016` | `WTP-RQ-018`; Design §16.4 | P8 | show-before-remove; explicit-force-only skill cases |
 | `OD-017` | `WTP-RQ-018`; Design §16.2 | P8 | fake PATH argv/stdout/stderr/exit propagation |
 | `OD-018` | `WTP-RQ-018`; Design §16.3-16.5 | P8 | result report fields; no Codex lifecycle call |
-| `OD-019` | planning status and Plan §1 | P0-P10 | proposed status; no implementation-complete claim |
+| `OD-019` | planning status and Plan §1 | P0-P10 | historical planning boundary; implementation is now complete |
 | `OD-020` | `WTP-AC-020`; Design `INV-018`; Plan scope | all | repository/path scope review; no SpecDock phase |
 | `OD-021` | `WTP-RQ-001`; document metadata, Design §17 | P0, P9 | repository/package identity checks |
+| `OD-022` | `WTP-RQ-012`; Design §12-13 | P5, P6 | nested visible; direct-child-only remove; force cannot bypass |
+| `OD-023` | `WTP-RQ-008`, `WTP-RQ-018`; Design §10-11, §16 | P4, P8 | hook/filter side-effect test and trust wording |
+| `OD-024` | `WTP-RQ-009`; Design §11 | P3, P4 | Make detection side-effect test without `init` target |
+| `OD-025` | `WTP-RQ-012`, `WTP-THREAT-001`; Design §13 | P6 | Git/target identity race regressions and scope boundary |
+| `OD-026` | `WTP-RQ-015`; Design §14 | P7 | schema v2 module, document, envelope and nullable tests |
 
 ### 17.2 Functional and non-functional requirements
 

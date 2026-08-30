@@ -1,13 +1,13 @@
 ---
 document: design
 product: worktree-provisioner
-status: proposed
+status: complete
 verified_repository: chemitaro/worktree-provisioner
-verified_branch: main
-verified_sha: 18c80a1f222a31df0617df5c8193388b3c301e0e
+verified_branch: codex/implement-worktree-provisioner
+verified_sha: d2b9c7e32a81adc1ddad1b5ed949f8e481477bfc
 owner_decision_source: docs/interview.md
 owner_decision_status: complete
-verified_at: 2026-08-24
+verified_at: 2026-08-31
 language: ja
 ---
 
@@ -31,7 +31,7 @@ language: ja
 - owner decisions: `docs/interview.md`（Round 1〜6 complete）
 - current code: four-command implementation with schema v2
 - SpecDock source/tests: provenance と regression scenario の参照元
-- implementation status: implemented candidate; final local/CI/Strict verification remains pending
+- implementation status: complete; final local/CI/Strict verification and manual create/list/show smoke passed
 
 既存 prototype の module structure と behavior は design authority ではない。特に legacy env lookup、bootstrap failure exit `0`、create-only CLI、generic JSON error、worktree flags を失う parser は置換する。
 

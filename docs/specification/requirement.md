@@ -1,13 +1,13 @@
 ---
 document: requirement
 product: worktree-provisioner
-status: proposed
+status: complete
 verified_repository: chemitaro/worktree-provisioner
-verified_branch: main
-verified_sha: 18c80a1f222a31df0617df5c8193388b3c301e0e
+verified_branch: codex/implement-worktree-provisioner
+verified_sha: d2b9c7e32a81adc1ddad1b5ed949f8e481477bfc
 owner_decision_source: docs/interview.md
 owner_decision_status: complete
-verified_at: 2026-08-24
+verified_at: 2026-08-31
 language: ja
 ---
 
@@ -19,13 +19,13 @@ language: ja
 
 SpecDock は機能・安全性・テスト観点の参照元に限定する。SpecDock の旧 CLI 構文、`SPEC_DOCK_WORKTREE_ROOT`、旧 JSON、message 文言、product identity への後方互換は提供しない。既存の create-only code は prototype として観察するが、採用済み architecture または完成実装とは扱わない。
 
-今回の成果物は要件・設計・実装計画であり、standalone tool、Codex skill、wrapper の実装は後続タスクで行う。SpecDock 側の削除、shim、migration、deprecation、文書更新は本 product task の完全なスコープ外である。
+standalone tool、Codex skill、wrapper の初期完成スコープは実装・検証済みである。SpecDock 側の削除、shim、migration、deprecation、文書更新は本 product task の完全なスコープ外である。
 
 ## 2. 正本と適用順位
 
 本要件の根拠は次の優先順位で扱う。
 
-1. `chemitaro/worktree-provisioner` の `main`、commit `18c80a1f222a31df0617df5c8193388b3c301e0e`
+1. `chemitaro/worktree-provisioner` の `codex/implement-worktree-provisioner`、implementation SHA `d2b9c7e32a81adc1ddad1b5ed949f8e481477bfc`
 2. `docs/interview.md` に記録された owner decisions。Round 1〜6 は完了済み
 3. 同 commit の既存 `docs/specification/{requirement,design,plan}.md`
 4. 同 commit の prototype code、tests、README、packaging metadata

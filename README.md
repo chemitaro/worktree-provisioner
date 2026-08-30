@@ -12,6 +12,14 @@ standalone CLI です。仕様書、タスク、Issue、Workbench を管理す�
 対象プラットフォームは macOS と Linux、Python は 3.10 以上です。Windows は初期版の対応対象外です。Python の
 runtime dependency はありません。
 
+## Implementation status
+
+初期完成スコープの実装は完了しています。`create` / `list` / `show` / `remove`、JSON schema v2、Codex skill、
+thin wrapper、macOS/Linux × Python 3.10〜3.13 CI、配布物buildとinstalled-wheel smoke、手動create/list/show smokeを
+検証済みです。Final Quality Gateは `P0=0`、`P1=0`、`review_status=pass` です。
+
+package registryへの公開とSpecDock側の削除・移行は、この初期完成スコープには含まれません。
+
 ## Installation
 
 ### Wheel または source distribution
